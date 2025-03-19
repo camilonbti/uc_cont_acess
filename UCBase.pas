@@ -12,15 +12,21 @@ interface
   {$DEFINE UCACTMANAGER}
 
 uses
+  UCDataInfo,
+  UCMail,
+  UCXPSettings,
+  UCMessages,
+  UCConsts,
 
   Winapi.Windows, Winapi.Messages, System.SysUtils, System.Variants, System.Classes,
-  Vcl.Graphics, Vcl.Controls, Vcl.Forms, Vcl.Dialogs, vcl.ExtActns, UCMail, UCXPSettings,
-  UCDataInfo, vcl.ActnMan, vcl.ActnMenus, Vcl.Menus, vcl.ActnList, UCMessages,
-  UCConsts, Data.DB;
+  Vcl.Graphics, Vcl.Controls, Vcl.Forms, Vcl.Dialogs, vcl.ExtActns,
+  vcl.ActnMan, vcl.ActnMenus, Vcl.Menus, vcl.ActnList, Data.DB, Winapi.ShellAPI;
 
 function Decrypt(const S: AnsiString; Key: Word): AnsiString;
 function Encrypt(const S: AnsiString; Key: Word): AnsiString;
 function GetVersionApp(const AFileName: String): String;
+function EncerrarAplicacao : string;
+function CurrentProcessIsRunning: boolean;
 
 {$IFDEF Ver130}
 function StrToBool ( Valor : String) : Boolean;
@@ -146,7 +152,6 @@ type
       property MaxLoginAttempts : Integer read FPassNTry write FPassNTry;
       property GetLoginName : TGetLoginName read FGetLoginName write FGetLoginName;
   end;
-
 
   TNaoPermitidos = class(TPersistent) // Ocultar e/ou Desabilitar os itens que o usuario nao tem acesso
     private
@@ -388,6 +393,8 @@ type
     procedure AddRightEX( idUser : Integer; Module, FormName, ObjName : String);
 
     procedure HideField(Sender: TField; var Text: String; DisplayText: Boolean);
+    procedure LimpaDadosUsuario;
+
 
   published
     property About: TUCAboutVar read FAbout write FAbout;
@@ -621,12 +628,20 @@ implementation
 
 { TUserControl }
 uses
-  CadPerfil_U, CadUser_U, UserPermis_U, TrocaSenha_U, MsgRecForm_U, MsgsForm_U, LoginWindow_U,
-  UCXPStyle, ViewLog_U;
+  CadPerfil_U,
+  CadUser_U,
+  UserPermis_U,
+  TrocaSenha_U,
+  MsgRecForm_U,
+  MsgsForm_U,
+  LoginWindow_U,
+  UCXPStyle,
+  ViewLog_U;
 
 constructor TUserControl.Create(AOwner: TComponent);
 begin
   inherited;
+
   FUser              := TUserDef.Create(self);
   ControlRight       := TUCControlRight.Create(Self);
   Login              := TLogin.Create(Self);
@@ -681,122 +696,140 @@ begin
     if Login.InitialLogin.Email = '' then
       Login.InitialLogin.Email := 'camilo@nbti.com.br';
 
-    FAutoStart := True;
-    UsersProfile.Active := True;
-    UsersForm.UsePrivilegedField := False;
-    UsersForm.ProtectAdmin := True;
-    NotAllowedItems.MenuVisible := True;
+    FAutoStart                    := True;
+    UsersProfile.Active           := True;
+    UsersForm.UsePrivilegedField  := False;
+    UsersForm.ProtectAdmin        := True;
+    NotAllowedItems.MenuVisible   := True;
     NotAllowedItems.ActionVisible := True;
-  end else begin
-    UCControlList := TList.Create;
+  end
+  else
+  begin
+    UCControlList    := TList.Create;
     LoginMonitorList := TList.Create;
   end;
   IniSettings(Settings);
 end;
-
 
 procedure TUserControl.Loaded;
 var
   Contador : integer;
 begin
   inherited;
-  if not (csDesigning in ComponentState) then
-  begin
-    for Contador := 0 to Pred(Owner.ComponentCount) do
-      if Owner.Components[Contador] is TUCSettings then ApplySettings(TUCSettings(Owner.Components[Contador]));
 
-    //retornou 2.13 qmd
-
-    if Assigned(UsersForm.MenuItem) and (not Assigned(UsersForm.MenuItem.OnClick)) then UsersForm.MenuItem.OnClick := ActionCadUser;
-    if Assigned(UsersForm.Action) and (not Assigned(UsersForm.Action.OnExecute)) then UsersForm.Action.OnExecute := ActionCadUser;
-
-    if UsersProfile.Active then
+  try
+    if not (csDesigning in ComponentState) then
     begin
-      if Assigned(UsersProfile.MenuItem) and (not Assigned(UsersProfile.MenuItem.OnClick)) then UsersProfile.MenuItem.OnClick := ActionUserProfile;
-      if Assigned(UsersProfile.Action) and (not Assigned(UsersProfile.Action.OnExecute)) then UsersProfile.Action.OnExecute := ActionUserProfile;
+      for Contador := 0 to Pred(Owner.ComponentCount) do
+        if Owner.Components[Contador] is TUCSettings then ApplySettings(TUCSettings(Owner.Components[Contador]));
+
+      //retornou 2.13 qmd
+
+      if Assigned(UsersForm.MenuItem) and (not Assigned(UsersForm.MenuItem.OnClick)) then UsersForm.MenuItem.OnClick := ActionCadUser;
+      if Assigned(UsersForm.Action) and (not Assigned(UsersForm.Action.OnExecute)) then UsersForm.Action.OnExecute := ActionCadUser;
+
+      if UsersProfile.Active then
+      begin
+        if Assigned(UsersProfile.MenuItem) and (not Assigned(UsersProfile.MenuItem.OnClick)) then UsersProfile.MenuItem.OnClick := ActionUserProfile;
+        if Assigned(UsersProfile.Action) and (not Assigned(UsersProfile.Action.OnExecute)) then UsersProfile.Action.OnExecute := ActionUserProfile;
+      end;
+
+      if Assigned(ChangePasswordForm.MenuItem) and (not Assigned(ChangePasswordForm.MenuItem.OnClick)) then ChangePasswordForm.MenuItem.OnClick := ActionTrocaSenha;
+      if Assigned(ChangePasswordForm.Action) and (not Assigned(ChangePasswordForm.Action.OnExecute)) then ChangePasswordForm.Action.OnExecute := ActionTrocaSenha;
+
+      if (LogControl.Active) then
+      begin
+        if Assigned(LogControl.MenuItem) and (not Assigned(LogControl.MenuItem.OnClick)) then LogControl.MenuItem.OnClick := ActionLog;
+        if Assigned(LogControl.Action) and (not Assigned(LogControl.Action.OnExecute))then LogControl.Action.OnExecute := ActionLog;
+      end;
+
+      if not Assigned(DataConnector) then raise Exception.Create('Property DataConnector not defined!');
+
+      if ApplicationID = '' then raise Exception.Create(MsgExceptAppID);
+
+      with TableUsers do
+      begin
+        if TableName = ''       then Exception.Create(MsgExceptUsersTable);
+        if FieldUserID = ''     then Exception.Create(MsgExceptUsersTable +#13+#10+ 'FieldUserID***');
+        if FieldUserName = ''   then Exception.Create(MsgExceptUsersTable +#13+#10+ 'FieldUserName***');
+        if FieldLogin = ''      then Exception.Create(MsgExceptUsersTable +#13+#10+ 'FieldLogin***');
+        if FieldPassword = ''   then Exception.Create(MsgExceptUsersTable +#13+#10+ 'FieldPassword***');
+        if FieldEmail = ''      then Exception.Create(MsgExceptUsersTable +#13+#10+ 'FieldEmail***');
+        if FieldPrivileged = '' then Exception.Create(MsgExceptUsersTable +#13+#10+ 'FieldPrivileged***');
+        if FieldTypeRec = ''    then Exception.Create(MsgExceptUsersTable +#13+#10+ 'FieldTypeRec***');
+        if FieldKey = ''        then Exception.Create(MsgExceptUsersTable +#13+#10+ 'FieldKey***');
+        if FieldProfile = ''    then Exception.Create(MsgExceptUsersTable +#13+#10+ 'FieldProfile***');
+      end;
+
+      with TableRights do
+      begin
+        if TableName = ''          then Exception.Create(MsgExceptRightsTable);
+        if FieldUserID = ''        then Exception.Create(MsgExceptRightsTable +#13+#10+ 'FieldProfile***');
+        if FieldModule = ''        then Exception.Create(MsgExceptRightsTable +#13+#10+ 'FieldModule***');
+        if FieldComponentName = '' then Exception.Create(MsgExceptRightsTable +#13+#10+ 'FieldComponentName***');
+        if FieldFormName = ''      then Exception.Create(MsgExceptRightsTable +#13+#10+ 'FieldFormName***');
+        if FieldKey = ''           then Exception.Create(MsgExceptRightsTable +#13+#10+ 'FieldKey***');
+      end;
+
+      if Assigned(OnStartApplication) then OnStartApplication(self);
+
+      //desviar para thread monitorando conexao ao banco qmd 30/01/2004
+      if FAutoStart then
+      begin
+        FThUCRun                 := TUCRun.Create(True);
+        FThUCRun.AOwner          := Self;
+        FThUCRun.FreeOnTerminate := True;
+        FThUCRun.Resume;
+      end;
     end;
-
-    if Assigned(ChangePasswordForm.MenuItem) and (not Assigned(ChangePasswordForm.MenuItem.OnClick)) then ChangePasswordForm.MenuItem.OnClick := ActionTrocaSenha;
-    if Assigned(ChangePasswordForm.Action) and (not Assigned(ChangePasswordForm.Action.OnExecute)) then ChangePasswordForm.Action.OnExecute := ActionTrocaSenha;
-
-    if (LogControl.Active) then
+  except on E: Exception do
     begin
-      if Assigned(LogControl.MenuItem) and (not Assigned(LogControl.MenuItem.OnClick)) then LogControl.MenuItem.OnClick := ActionLog;
-      if Assigned(LogControl.Action) and (not Assigned(LogControl.Action.OnExecute))then LogControl.Action.OnExecute := ActionLog;
-    end;
-
-    if not Assigned(DataConnector) then raise Exception.Create('Property DataConnector not defined!');
-
-    if ApplicationID = '' then raise Exception.Create(MsgExceptAppID);
-
-    with TableUsers do
-    begin
-      if TableName = ''       then Exception.Create(MsgExceptUsersTable);
-      if FieldUserID = ''     then Exception.Create(MsgExceptUsersTable +#13+#10+ 'FieldUserID***');
-      if FieldUserName = ''   then Exception.Create(MsgExceptUsersTable +#13+#10+ 'FieldUserName***');
-      if FieldLogin = ''      then Exception.Create(MsgExceptUsersTable +#13+#10+ 'FieldLogin***');
-      if FieldPassword = ''   then Exception.Create(MsgExceptUsersTable +#13+#10+ 'FieldPassword***');
-      if FieldEmail = ''      then Exception.Create(MsgExceptUsersTable +#13+#10+ 'FieldEmail***');
-      if FieldPrivileged = '' then Exception.Create(MsgExceptUsersTable +#13+#10+ 'FieldPrivileged***');
-      if FieldTypeRec = ''    then Exception.Create(MsgExceptUsersTable +#13+#10+ 'FieldTypeRec***');
-      if FieldKey = ''        then Exception.Create(MsgExceptUsersTable +#13+#10+ 'FieldKey***');
-      if FieldProfile = ''    then Exception.Create(MsgExceptUsersTable +#13+#10+ 'FieldProfile***');
-    end;
-    with TableRights do
-    begin
-      if TableName = ''          then Exception.Create(MsgExceptRightsTable);
-      if FieldUserID = ''        then Exception.Create(MsgExceptRightsTable +#13+#10+ 'FieldProfile***');
-      if FieldModule = ''        then Exception.Create(MsgExceptRightsTable +#13+#10+ 'FieldModule***');
-      if FieldComponentName = '' then Exception.Create(MsgExceptRightsTable +#13+#10+ 'FieldComponentName***');
-      if FieldFormName = ''      then Exception.Create(MsgExceptRightsTable +#13+#10+ 'FieldFormName***');
-      if FieldKey = ''           then Exception.Create(MsgExceptRightsTable +#13+#10+ 'FieldKey***');
-    end;
-
-    if Assigned(OnStartApplication) then OnStartApplication(self);
-
-    //desviar para thread monitorando conexao ao banco qmd 30/01/2004
-    if FAutoStart then
-    begin
-      FThUCRun := TUCRun.Create(True);
-      FThUCRun.AOwner := Self;
-      FThUCRun.FreeOnTerminate := True;
-      FThUCRun.Resume;
+      ShowMessage('Erro ao aplicar permissões: ' + E.Message);
+      EncerrarAplicacao;
     end;
   end;
 end;
 
 procedure TUserControl.ActionUserProfile(Sender : TObject);
 begin
-  if Assigned(OnCustomUsersProfileForm) then OnCustomUsersProfileForm(Self, FormPerfilUsuarios);
-  if FormPerfilUsuarios = nil then CriaProfileUserForm;
-  FormPerfilUsuarios.ShowModal;
-  FreeAndNil(FormPerfilUsuarios);
+  if Assigned(OnCustomUsersProfileForm) then
+    OnCustomUsersProfileForm(Self, FormPerfilUsuarios);
+
+  if FormPerfilUsuarios = nil then
+    CriaProfileUserForm;
+
+  try
+    FormPerfilUsuarios.ShowModal;
+  finally
+    FreeAndNil(FormPerfilUsuarios);
+  end;
 end;
 
 procedure TUserControl.CriaProfileUserForm;
 begin
   FormPerfilUsuarios := TCadPerfil.Create(self);
+
   with Settings.UsersProfile, TCadPerfil(FormPerfilUsuarios) do
   begin
-    Caption := WindowCaption;
+    Caption             := WindowCaption;
     lbDescricao.Caption := LabelDescription;
-    btAdic.Caption := BtAdd;
-    BtAlt.Caption := BtChange;
-    BtExclui.Caption := BtDelete;
-    BtAcess.Caption := BtRights;
-    BtExit.Caption := BtClose;
-    BtAcess.OnClick := ActionBtPermissProfile;
-    UCComponent := Self;
-   //c Position := Self.Settings.WindowsPosition;
+    btAdic.Caption      := BtAdd;
+    BtAlt.Caption       := BtChange;
+    BtExclui.Caption    := BtDelete;
+    BtAcess.Caption     := BtRights;
+    BtExit.Caption      := BtClose;
+    BtAcess.OnClick     := ActionBtPermissProfile;
+    UCComponent         := Self;
+   //c Position         := Self.Settings.WindowsPosition;
   end;
-
 end;
-
 
 procedure TUserControl.ActionBtPermissProfile(Sender: TObject);
 begin
-  if TCadPerfil(FormPerfilUsuarios).DSPerfilUser.IsEmpty then Exit;
-  UserPermis := TUserPermis.Create(self);
+  if TCadPerfil(FormPerfilUsuarios).DSPerfilUser.IsEmpty then
+    Exit;
+
+  UserPermis             := TUserPermis.Create(self);
   UserPermis.UCComponent := Self;
   SetWindowProfile;
   UserPermis.lbUser.Caption := TCadPerfil(FormPerfilUsuarios).DSPerfilUser.FieldByName('Nome').asString;
@@ -807,53 +840,64 @@ procedure TUserControl.SetWindowProfile;
 begin
   with Settings.Rights do
   begin
-    UserPermis.Caption := WindowCaption;
+    UserPermis.Caption             := WindowCaption;
     UserPermis.LbDescricao.Caption := LabelProfile;
-    UserPermis.lbUser.Left := UserPermis.LbDescricao.Left + UserPermis.LbDescricao.Width + 5;
-    UserPermis.PageMenu.Caption := PageMenu;
-    UserPermis.PageAction.Caption := PageActions;
-    UserPermis.BtLibera.Caption := BtUnlock;
-    UserPermis.BtBloqueia.Caption := BtLock;
-    UserPermis.BtGrava.Caption := BtSave;
-    UserPermis.BtCancel.Caption := BtCancel;
-
+    UserPermis.lbUser.Left         := UserPermis.LbDescricao.Left + UserPermis.LbDescricao.Width + 5;
+    UserPermis.PageMenu.Caption    := PageMenu;
+    UserPermis.PageAction.Caption  := PageActions;
+    UserPermis.BtLibera.Caption    := BtUnlock;
+    UserPermis.BtBloqueia.Caption  := BtLock;
+    UserPermis.BtGrava.Caption     := BtSave;
+    UserPermis.BtCancel.Caption    := BtCancel;
   end;
 end;
 
-
 procedure TUserControl.ActionCadUser(Sender: TObject);
 begin
-  if Assigned(OnCustomUsersForm) then OnCustomUsersForm(Self, FormCadastroUsuarios);
-  if FormCadastroUsuarios = nil then CriaCadUserForm;
-  FormCadastroUsuarios.ShowModal;
-  FreeAndNil(FormCadastroUsuarios);
-end;
+  if Assigned(OnCustomUsersForm) then
+    OnCustomUsersForm(Self, FormCadastroUsuarios);
 
+  if FormCadastroUsuarios = nil then
+    CriaCadUserForm;
+
+  try
+    FormCadastroUsuarios.ShowModal;
+  finally
+    FreeAndNil(FormCadastroUsuarios);
+  end;
+end;
 
 procedure TUserControl.ActionTrocaSenha(Sender: TObject);
 begin
-  if Assigned(OnCustomChangePasswordForm) then OnCustomChangePasswordForm(Self, FormTrocarSenha);
-  if FormTrocarSenha = nil then CriaTrocaSenhaForm;
-  FormTrocarSenha.ShowModal;
-  FreeAndNil(FormTrocarSenha);
-end;
+  if Assigned(OnCustomChangePasswordForm) then
+    OnCustomChangePasswordForm(Self, FormTrocarSenha);
 
+  if FormTrocarSenha = nil then
+    CriaTrocaSenhaForm;
+
+  try
+    FormTrocarSenha.ShowModal;
+  finally
+    FreeAndNil(FormTrocarSenha);
+  end;
+end;
 
 procedure TUserControl.CriaCadUserForm;
 begin
   FormCadastroUsuarios := TCadUser.Create(self);
+
   with Settings.UsersForm, TCadUser(FormCadastroUsuarios) do
   begin
-    Caption := WindowCaption;
+    Caption               := WindowCaption;
 //    lbDescricao.Caption := LabelDescription;
-    btAdic.Caption := BtAdd;
-    BtAlt.Caption := BtChange;
-    BtExclui.Caption := BtDelete;
-    BtAcess.Caption := BtRights;
-    BtPass.Caption := BtPassword;
-    BtExit.Caption := BtClose;
-    BtAcess.OnClick := Self.ActionBtPermiss;
-    UCComponent := Self;
+    btAdic.Caption        := BtAdd;
+    BtAlt.Caption         := BtChange;
+    BtExclui.Caption      := BtDelete;
+    BtAcess.Caption       := BtRights;
+    BtPass.Caption        := BtPassword;
+    BtExit.Caption        := BtClose;
+    BtAcess.OnClick       := Self.ActionBtPermiss;
+    UCComponent           := Self;
 
    //c Position := Self.Settings.WindowsPosition;
   end;
@@ -861,7 +905,9 @@ end;
 
 procedure TUserControl.ActionBtPermiss(Sender: TObject);
 begin
-  if TCadUser(FormCadastroUsuarios).DSCadUser.IsEmpty then Exit;
+  if TCadUser(FormCadastroUsuarios).DSCadUser.IsEmpty then
+    Exit;
+
   UserPermis := TUserPermis.Create(self);
   UserPermis.UCComponent := Self;
   SetWindow;
@@ -873,33 +919,37 @@ procedure TUserControl.SetWindow;
 begin
   with Settings.Rights do
   begin
-    UserPermis.Caption := WindowCaption;
+    UserPermis.Caption             := WindowCaption;
     UserPermis.LbDescricao.Caption := LabelUser;
-    UserPermis.lbUser.Left := UserPermis.LbDescricao.Left + UserPermis.LbDescricao.Width + 5;
-    UserPermis.PageMenu.Caption := PageMenu;
-    UserPermis.PageAction.Caption := PageActions;
-    UserPermis.BtLibera.Caption := BtUnlock;
-    UserPermis.BtBloqueia.Caption := BtLOck;
-    UserPermis.BtGrava.Caption := BtSave;
-    UserPermis.BtCancel.Caption := BtCancel;
-
+    UserPermis.lbUser.Left         := UserPermis.LbDescricao.Left + UserPermis.LbDescricao.Width + 5;
+    UserPermis.PageMenu.Caption    := PageMenu;
+    UserPermis.PageAction.Caption  := PageActions;
+    UserPermis.BtLibera.Caption    := BtUnlock;
+    UserPermis.BtBloqueia.Caption  := BtLOck;
+    UserPermis.BtGrava.Caption     := BtSave;
+    UserPermis.BtCancel.Caption    := BtCancel;
   end;
 end;
 
 procedure TUserControl.CriaTrocaSenhaForm;
 begin
- FormTrocarSenha := TTrocaSenha.Create(Self);
- with Settings.ChangePassword do begin
-   TTrocaSenha(FormTrocarSenha).Caption := WindowCaption;
-   TTrocaSenha(FormTrocarSenha).lbDescricao.Caption := LabelDescription;
-   TTrocaSenha(FormTrocarSenha).lbSenhaAtu.Caption := LabelCurrentPassword;
-   TTrocaSenha(FormTrocarSenha).lbNovaSenha.Caption := LabelNewPassword;
-   TTrocaSenha(FormTrocarSenha).lbConfirma.Caption := LabelConfirm;
-   TTrocaSenha(FormTrocarSenha).btGrava.Caption := BtSave;
-   TTrocaSenha(FormTrocarSenha).btCancel.Caption := BtCancel;
- end;
- TTrocaSenha(FormTrocarSenha).btGrava.OnClick := ActionTSBtGrava;
- if CurrentUser.Password = '' then TTrocaSenha(FormTrocarSenha).EditAtu.Enabled := False;
+  FormTrocarSenha := TTrocaSenha.Create(Self);
+
+  with Settings.ChangePassword do
+  begin
+    TTrocaSenha(FormTrocarSenha).Caption             := WindowCaption;
+    TTrocaSenha(FormTrocarSenha).lbDescricao.Caption := LabelDescription;
+    TTrocaSenha(FormTrocarSenha).lbSenhaAtu.Caption  := LabelCurrentPassword;
+    TTrocaSenha(FormTrocarSenha).lbNovaSenha.Caption := LabelNewPassword;
+    TTrocaSenha(FormTrocarSenha).lbConfirma.Caption  := LabelConfirm;
+    TTrocaSenha(FormTrocarSenha).btGrava.Caption     := BtSave;
+    TTrocaSenha(FormTrocarSenha).btCancel.Caption    := BtCancel;
+  end;
+
+  TTrocaSenha(FormTrocarSenha).btGrava.OnClick := ActionTSBtGrava;
+
+  if CurrentUser.Password = '' then
+    TTrocaSenha(FormTrocarSenha).EditAtu.Enabled := False;
 end;
 
 procedure TUserControl.ActionTSBtGrava(Sender: TObject);
@@ -910,30 +960,35 @@ begin
      TTrocaSenha(FormTrocarSenha).EditAtu.SetFocus;
      Exit;
    end;
+
    if TTrocaSenha(FormTrocarSenha).EditNova.Text <> TTrocaSenha(FormTrocarSenha).EditConfirma.Text then
    begin
      MessageDlg(Settings.CommonMessages.ChangePasswordError.InvalidNewPassword, mtWarning, [mbOK], 0);
      TTrocaSenha(FormTrocarSenha).EditNova.SetFocus;
      Exit;
    end;
+
    if TTrocaSenha(FormTrocarSenha).EditNova.Text = CurrentUser.Password then
    begin
      MessageDlg(Settings.CommonMessages.ChangePasswordError.NewEqualCurrent, mtWarning, [mbOK], 0);
      TTrocaSenha(FormTrocarSenha).EditNova.SetFocus;
      Exit;
    end;
+
    if (ChangePasswordForm.ForcePassword) and (TTrocaSenha(FormTrocarSenha).EditNova.Text = '') then
    begin
      MessageDlg( Settings.CommonMessages.ChangePasswordError.PasswordRequired, mtWarning, [mbOK], 0);
      TTrocaSenha(FormTrocarSenha).EditNova.Text;
      Exit;
    end;
+
    if Length(TTrocaSenha(FormTrocarSenha).EditNova.Text) < ChangePasswordForm.MinPasswordLength then
    begin
      MessageDlg(Format(Settings.CommonMessages.ChangePasswordError.MinPasswordLength,[ChangePasswordForm.MinPasswordLength]), mtWarning, [mbOK], 0);
      TTrocaSenha(FormTrocarSenha).EditNova.SetFocus;
      Exit;
    end;
+
    if Pos(LowerCase(TTrocaSenha(FormTrocarSenha).EditNova.Text),'asdfqwerzxcv1234567890321654987teste'+LowerCase(CurrentUser.Username) + LowerCase(CurrentUser.LoginName)) > 0 then
    begin
      MessageDlg( Settings.CommonMessages.ChangePasswordError.InvalidNewPassword, mtWarning, [mbOK], 0);
@@ -941,12 +996,16 @@ begin
      Exit;
    end;
 
-   if Assigned( OnChangePassword) then OnChangePassword(Self, CurrentUser.UserID, CurrentUser.LoginName, CurrentUser.Password,TTrocaSenha(FormTrocarSenha).EditNova.Text);
-   ChangePassword(CurrentUser.UserID, TTrocaSenha(FormTrocarSenha).EditNova.Text);
+   if Assigned( OnChangePassword) then
+     OnChangePassword(Self, CurrentUser.UserID, CurrentUser.LoginName, CurrentUser.Password,TTrocaSenha(FormTrocarSenha).EditNova.Text);
 
+   ChangePassword(CurrentUser.UserID, TTrocaSenha(FormTrocarSenha).EditNova.Text);
    CurrentUser.Password := TTrocaSenha(FormTrocarSenha).EditNova.Text;
-   if CurrentUser.Password = '' then MessageDlg(Format(Settings.CommonMessages.BlankPassword,[CurrentUser.LoginName]) , mtInformation, [mbOK], 0)
-   else MessageDlg(Settings.CommonMessages.PasswordChanged, mtInformation, [mbOK], 0);
+
+   if CurrentUser.Password = '' then
+     MessageDlg(Format(Settings.CommonMessages.BlankPassword,[CurrentUser.LoginName]) , mtInformation, [mbOK], 0)
+   else
+     MessageDlg(Settings.CommonMessages.PasswordChanged, mtInformation, [mbOK], 0);
 
 {$IFDEF VER130}
 {$ELSE}
@@ -964,7 +1023,6 @@ begin
 {$ENDIF}
    TTrocaSenha(FormTrocarSenha).Close;
 end;
-
 
 const
   Codes64 = '0A1B2C3D4E5F6G7H89IjKlMnOPqRsTuVWXyZabcdefghijkLmNopQrStUvwxYz+/';
@@ -1020,6 +1078,7 @@ var
 begin
   SS := S;
   Result := '';
+
   while SS <> '' do
   begin
     Result := Result + Decode(Copy(SS, 1, 4));
@@ -1108,8 +1167,8 @@ procedure TUserControl.SetLoginWindow(Form: TCustomForm);
 begin
   with Settings.Login, Form as TLoginWindow do
   begin
-    Caption := WindowCaption;
-    btOK.Caption := Settings.Login.BtOk;
+    Caption           := WindowCaption;
+    btOK.Caption      := Settings.Login.BtOk;
     BtCancela.Caption := BtCancel;
 //    if LeftImage <> nil then ImgLeft.Picture.Assign(LeftImage);
 //    if BottomImage <> nil then ImgBottom.Picture.Assign(BottomImage);
@@ -1126,98 +1185,139 @@ begin
     UCXPStyle.Active := Self.Settings.XPStyle;}
    //c Position := Self.Settings.WindowsPosition;
   end;
-
 end;
-
 
 procedure TUserControl.Notification(AComponent: TComponent;
   AOperation: TOperation);
 begin
   if (AOperation = opRemove) then
   begin
-    if AComponent = UsersForm.MenuItem then UsersForm.MenuItem := nil;
-    if AComponent = UsersForm.Action then UsersForm.Action := nil;
-    if AComponent = UsersProfile.MenuItem then UsersProfile.MenuItem := nil;
-    if AComponent = UsersProfile.Action then UsersProfile.Action := nil;
-    if AComponent = ChangePasswordForm.Action then ChangePasswordForm.Action := nil;
-    if AComponent = ChangePasswordForm.MenuItem then ChangePasswordForm.MenuItem := nil;
-    if AComponent = ControlRight.MainMenu then ControlRight.MainMenu := nil;
-    if AComponent = ControlRight.ActionList then ControlRight.ActionList := nil;
+    if AComponent = UsersForm.MenuItem then
+      UsersForm.MenuItem := nil;
+
+    if AComponent = UsersForm.Action then
+      UsersForm.Action := nil;
+
+    if AComponent = UsersProfile.MenuItem then
+      UsersProfile.MenuItem := nil;
+
+    if AComponent = UsersProfile.Action then
+      UsersProfile.Action := nil;
+
+    if AComponent = ChangePasswordForm.Action then
+      ChangePasswordForm.Action := nil;
+
+    if AComponent = ChangePasswordForm.MenuItem then
+      ChangePasswordForm.MenuItem := nil;
+
+    if AComponent = ControlRight.MainMenu then
+      ControlRight.MainMenu := nil;
+
+    if AComponent = ControlRight.ActionList then
+      ControlRight.ActionList := nil;
+
     {$IFDEF UCACTMANAGER}
-    if AComponent = ControlRight.ActionManager then ControlRight.ActionManager := nil;
-    if AComponent = ControlRight.ActionMainMenuBar then  ControlRight.ActionMainMenuBar := nil;
+    if AComponent = ControlRight.ActionManager then
+      ControlRight.ActionManager := nil;
+
+    if AComponent = ControlRight.ActionMainMenuBar then
+      ControlRight.ActionMainMenuBar := nil;
     {$ENDIF}
-    if AComponent = LogControl.MenuItem then LogControl.MenuItem := nil;
-    if AComponent = LogControl.Action then LogControl.Action := nil;
-    if AComponent = FUCDataConn then FUCDataConn := nil;
-{$IFDEF VER130}
-{$ELSE}
-    if AComponent = FMailUserControl then FMailUserControl := nil;
-{$ENDIF}
+
+    if AComponent = LogControl.MenuItem then
+      LogControl.MenuItem := nil;
+
+    if AComponent = LogControl.Action then
+      LogControl.Action := nil;
+
+    if AComponent = FUCDataConn then
+      FUCDataConn := nil;
+
+    {$IFDEF VER130}
+    {$ELSE}
+    if AComponent = FMailUserControl then
+      FMailUserControl := nil;
+    {$ENDIF}
   end;
   inherited Notification (AComponent, AOperation);
 end;
-
 
 procedure TUserControl.ActionLog(Sender: TObject);
 begin
   FormLogControl := TViewLog.Create(self);
   TViewLog(FormLogControl).UCComponent := Self;
+
   with TViewLog(FormLogControl), Settings.Log do
   begin
-    Caption := WindowCaption;
-    lbDescricao.Caption := LabelDescription;
-    lbUsuario.Caption := LabelUser;
-    lbData.Caption := LabelDate;
-    lbNivel.Caption := LabelLevel;
-    BtFiltro.Caption := BtFilter;
-    BtExclui.Caption := BtDelete;
-    BtFecha.Caption := BtClose;
+    Caption                          := WindowCaption;
+    lbDescricao.Caption              := LabelDescription;
+    lbUsuario.Caption                := LabelUser;
+    lbData.Caption                   := LabelDate;
+    lbNivel.Caption                  := LabelLevel;
+    BtFiltro.Caption                 := BtFilter;
+    BtExclui.Caption                 := BtDelete;
+    BtFecha.Caption                  := BtClose;
     DbGrid1.Columns[0].Title.Caption := ColLevel;
     DbGrid1.Columns[1].Title.Caption := ColMessage;
     DbGrid1.Columns[2].Title.Caption := ColUser;
     DbGrid1.Columns[3].Title.Caption := ColDate;
-   //c Position := Self.Settings.WindowsPosition;
+   //c Position                      := Self.Settings.WindowsPosition;
   end;
-  TViewLog(FormLogControl).ShowModal;
-  FreeandNil(FormLogControl);
+
+  try
+    TViewLog(FormLogControl).ShowModal;
+  finally
+    FreeandNil(FormLogControl);
+  end;
 end;
 
 procedure TUserControl.Log(MSG: String; Level: Integer);
 begin
-  if not LogControl.Active then Exit;
+  if not LogControl.Active then
+    Exit;
+
   DataConnector.UCExecSQL('Insert into ' + LogControl.TableLog + '( IdUser, MSG, Data, Nivel) Values ( '+
             IntToStr(CurrentUser.UserID)+', '+
             QuotedStr(Copy(MSG,1,250))+', '+
             QuotedStr(FormatDateTime('YYYYMMDDhhmmss',now))+', '+
             IntToStr(Level)+')');
 end;
+
 {$IFDEF VER130}
 {$ELSE}
 procedure TUserControl.SetFMailUserControl(const Value: TMailUserControl);
 begin
   FMailUserControl := Value;
-  if Value <> nil then Value.FreeNotification(Self);
+  if Value <> nil then
+    Value.FreeNotification(Self);
 end;
 {$ENDIF}
 
 procedure TUserControl.RegistraCurrentUser( dados : TDataset);
 begin
-  with CurrentUser do
-  begin
-    UserID := Dados.FieldByName(TableUsers.FieldUserID).asInteger;
-    Username := Dados.FieldByName(TableUsers.FieldUserName).asString;
-    LoginName:= Dados.FieldByName(TableUsers.FieldLogin).asString;
-    Password := Decrypt(Dados.FieldByName(TableUsers.FieldPassword).asString, EncryptKey);
-    Email := Dados.FieldByName(TableUsers.FieldEmail).asString;
-    Privilegiado := StrToBool(Dados.FieldByName(TableUsers.FieldPrivileged).asString);
-    Profile := Dados.FieldByName(TableUsers.FieldProfile).asInteger;
-    if Assigned(OnLoginSucess) then OnLoginSucess(Self, UserID, LoginName, UserName, Password, EMail, Privilegiado);
-  end;
-  ApplyRightsUCControlMonitor;
-  NotificationLoginMonitor;
-end;
+  try
+    with CurrentUser do
+    begin
+      UserID       := Dados.FieldByName(TableUsers.FieldUserID).asInteger;
+      Username     := Dados.FieldByName(TableUsers.FieldUserName).asString;
+      LoginName    := Dados.FieldByName(TableUsers.FieldLogin).asString;
+      Password     := Decrypt(Dados.FieldByName(TableUsers.FieldPassword).asString, EncryptKey);
+      Email        := Dados.FieldByName(TableUsers.FieldEmail).asString;
+      Privilegiado := StrToBool(Dados.FieldByName(TableUsers.FieldPrivileged).asString);
+      Profile      := Dados.FieldByName(TableUsers.FieldProfile).asInteger;
 
+      if Assigned(OnLoginSucess) then
+        OnLoginSucess(Self, UserID, LoginName, UserName, Password, EMail, Privilegiado);
+    end;
+    ApplyRightsUCControlMonitor;
+    NotificationLoginMonitor;
+  except on E: Exception do
+    begin
+      ShowMessage('Erro ao aplicar permissões: ' + E.Message);
+      EncerrarAplicacao;
+    end;
+  end;
+end;
 
 {$IFDEF VER130}
 {$ELSE}
@@ -1225,51 +1325,59 @@ procedure TUserControl.ActionEsqueceuSenha(Sender: TObject);
 var
   FDataset : TDataset;
 begin
-  FDataset := DataConnector.UCGetSQLDataset('Select * from '+ TableUsers.TableName + ' Where '+
-              TableUsers.FieldLogin+' = '+ QuotedStr(TLoginWindow(FormLogin).EditUsuario.Text));
-  with FDataset do
-    try
-      if not IsEmpty then
-        MailUserControl.EnviaEsqueceuSenha( fieldbyname(TableUsers.FieldUserName).asString,
-                                            fieldbyname(TableUsers.FieldLogin).asString,
-                                            fieldbyname(TableUsers.FieldPassword).asString,
-                                            fieldbyname(TableUsers.FieldEmail).asString, '', EncryptKey)
-      else MessageDlg(Settings.CommonMessages.InvalidLogin, mtWarning, [mbOK], 0);
-    finally
-      Close;
-      Free;
-    end;
+  Exit;
+
+//  FDataset := DataConnector.UCGetSQLDataset('Select * from '+ TableUsers.TableName + ' Where '+
+//              TableUsers.FieldLogin+' = '+ QuotedStr(TLoginWindow(FormLogin).EditUsuario.Text));
+//  with FDataset do
+//    try
+//      if not IsEmpty then
+//        MailUserControl.EnviaEsqueceuSenha( fieldbyname(TableUsers.FieldUserName).asString,
+//                                            fieldbyname(TableUsers.FieldLogin).asString,
+//                                            fieldbyname(TableUsers.FieldPassword).asString,
+//                                            fieldbyname(TableUsers.FieldEmail).asString, '', EncryptKey)
+//      else MessageDlg(Settings.CommonMessages.InvalidLogin, mtWarning, [mbOK], 0);
+//    finally
+//      Close;
+//      Free;
+//    end;
 end;
 {$ENDIF}
 
 procedure TUserControl.TryAutoLogon;
 begin
+  ShowMessage('Auto Logon desativado, a aplicao sera encerrada');
+  EncerrarAplicacao;
+
+  exit;
+
   if not VerificaLogin(Login.AutoLogon.User, Login.AutoLogon.Password) then
   begin
-    if Login.AutoLogon.MessageOnError then MessageDlg(Settings.CommonMessages.AutoLogonError, mtWarning, [mbOK], 0);
+    if Login.AutoLogon.MessageOnError then
+      MessageDlg(Settings.CommonMessages.AutoLogonError, mtWarning, [mbOK], 0);
     ShowLogin;
   end;
 end;
 
-
 function TUserControl.VerificaLogin(User, Password: String): Boolean;
 var
   vSenha, Key : String;
-  FDataset : TDataset;
+  FDataset    : TDataset;
 begin
-  vSenha := TableUsers.FieldPassword +  ' = ' + QuotedStr(Encrypt(Password, EncryptKey));
-  FDataset := DataConnector.UCGetSQLDataset('Select * from '+ TableUsers.TableName + ' Where '+
-              TableUsers.FieldLogin+' = '+ QuotedStr(User) + ' and ' + vSenha);
-   ////exibe a senha admin
+  try
+    vSenha   := TableUsers.FieldPassword +  ' = ' + QuotedStr(Encrypt(Password, EncryptKey));
+    FDataset := DataConnector.UCGetSQLDataset('Select * from '+
+                  TableUsers.TableName + ' Where '+
+                  TableUsers.FieldLogin+' = '+ QuotedStr(User) +
+                  ' and ' + vSenha);
 
-///
-  //excluir
-//          FDataset := DataConnector.UCGetSQLDataset('Select * from '+ TableUsers.TableName + ' Where '+
-//                       TableUsers.FieldLogin+' = '+ QuotedStr('Admin'));
-//               Key := Decrypt(FDataset.FieldByName(TableUsers.FieldKey).asString, EncryptKey);
+  ///codigo comentado para exibir a senha do admin quando a mesma for esquecida
+  //          FDataset := DataConnector.UCGetSQLDataset('Select * from '+ TableUsers.TableName + ' Where '+
+  //                       TableUsers.FieldLogin+' = '+ QuotedStr('Admin'));
+  //               Key := Decrypt(FDataset.FieldByName(TableUsers.FieldKey).asString, EncryptKey);
   ////
 
-  with FDataset do
+    with FDataset do
     try
       if not IsEmpty then
       begin
@@ -1280,32 +1388,54 @@ begin
                   Decrypt(FDataSet.FieldByName(TableUsers.FieldPassword).asString, EncryptKey) then
         begin
           Result := False;
-          if Assigned(OnLoginError) then OnLoginError(Self, User, Password);
-        end else
+          if Assigned(OnLoginError) then
+            OnLoginError(Self, User, Password);
+        end
+        else
         begin
           Result := True;
           RegistraCurrentuser(FDataset);
         end;
-      end else begin
+      end
+      else
+      begin
         Result := False;
-        if Assigned(OnLoginError) then OnLoginError(Self, User, Password);
+        if Assigned(OnLoginError) then
+          OnLoginError(Self, User, Password);
       end;
-    finally
-      Close;
-      Free;
+  finally
+    Close;
+    Free;
+  end;
+   except on E: Exception do
+    begin
+      ShowMessage('Erro ao aplicar permissões: ' + E.Message);
+      EncerrarAplicacao;
     end;
+  end;
 end;
 
 procedure TUserControl.Logoff;
 begin
-  if Assigned(onLogoff) then
-    onLogoff(Self, CurrentUser.UserID);
-  LockControlsUCControlMonitor;
+  try
+    if Assigned(onLogoff) then
+      onLogoff(Self, CurrentUser.UserID);
 
-  CurrentUser.UserID := 0;
-  if LoginMode = lmActive then
-    ShowLogin;
-  ApplyRights;
+    LockControlsUCControlMonitor;
+
+    LimpaDadosUsuario;
+
+    if LoginMode = lmActive then
+      ShowLogin;
+
+    ApplyRights;
+
+   except on E: Exception do
+    begin
+      ShowMessage('Erro ao aplicar permissões: ' + E.Message);
+      EncerrarAplicacao;
+    end;
+  end;
 end;
 
 function TUserControl.AddUser(Login, Password, Name, Mail: String;
@@ -1313,20 +1443,32 @@ function TUserControl.AddUser(Login, Password, Name, Mail: String;
 var
   Key : String;
 begin
-  with DataConnector.UCGetSQLDataset('Select Max('+TableUsers.FieldUserID+') as IdUser from ' + TableUsers.TableName) do
-  begin
-    Result := Fieldbyname('idUser').asInteger + 1;
-    Close;
-    Free;
+  try
+    with DataConnector.UCGetSQLDataset('Select Max('+
+           TableUsers.FieldUserID+') as IdUser '+
+           ' from ' + TableUsers.TableName) do
+    begin
+      Result := Fieldbyname('idUser').asInteger + 1;
+      Close;
+      Free;
+    end;
+
+    Key := Encrypt( IntToStr(Result)+Login+Password, EncryptKey );
+
+    with TableUsers do
+      DataConnector.UCExecSQL(Format('Insert into %s( %s, %s, %s, %s, %s, %s, %s, %s, %s) VALUES(%d, %s, %s, %s, %s, %s, %d, %s, %s)',
+                [ TableName,
+                  FieldUserID, FieldUserName, FieldLogin, FieldPassword, FieldEmail, FieldPrivileged, FieldProfile, FieldTypeRec, FieldKey,
+                  Result, QuotedStr(Name), QuotedStr(Login), QuotedStr(Encrypt(Password, EncryptKey)),
+                  QuotedStr(Mail), BoolToStr(PrivUser), Profile, QuotedStr('U'), QuotedStr(Key)]));
+    if Assigned(OnAddUser) then
+      OnAddUser(Self, Login, Password, Name, Mail, Profile, Privuser);
+   except on E: Exception do
+    begin
+      ShowMessage('Erro ao aplicar permissões: ' + E.Message);
+      EncerrarAplicacao;
+    end;
   end;
-  Key := Encrypt( IntToStr(Result)+Login+Password, EncryptKey );
-  with TableUsers do
-    DataConnector.UCExecSQL(Format('Insert into %s( %s, %s, %s, %s, %s, %s, %s, %s, %s) VALUES(%d, %s, %s, %s, %s, %s, %d, %s, %s)',
-              [ TableName,
-                FieldUserID, FieldUserName, FieldLogin, FieldPassword, FieldEmail, FieldPrivileged, FieldProfile, FieldTypeRec, FieldKey,
-                Result, QuotedStr(Name), QuotedStr(Login), QuotedStr(Encrypt(Password, EncryptKey)),
-                QuotedStr(Mail), BoolToStr(PrivUser), Profile, QuotedStr('U'), QuotedStr(Key)]));
-  if Assigned(OnAddUser) then OnAddUser(Self, Login, Password, Name, Mail, Profile, Privuser);
 end;
 
 procedure TUserControl.ChangePassword(IDUser: Integer; NewPassword: String);
@@ -1335,19 +1477,36 @@ var
   Key : String;
 begin
   inherited;
-  with DataConnector.UCGetSQLDataset('Select '+TableUsers.FieldLogin+' as login, '+TableUsers.FieldPassword+
-    ' as senha from ' + TableUsers.TableName+' where '+TableUsers.FieldUserID+' = '+ IntToStr(IdUser)) do
-  begin
-    FLogin := Fieldbyname('Login').asString;
-    Key := Encrypt( IntToStr(IDUser)+FLogin+NewPassword, EncryptKey );
-    FSenha := Decrypt(FieldByName('Senha').asString, EncryptKey);
-    Close;
-    Free;
+
+  try
+    with DataConnector.UCGetSQLDataset('Select '+
+           TableUsers.FieldLogin+' as login, '+
+           TableUsers.FieldPassword+ ' as senha '+
+           ' from ' + TableUsers.TableName+
+           ' where '+TableUsers.FieldUserID+' = '+ IntToStr(IdUser)) do
+    begin
+      FLogin := Fieldbyname('Login').asString;
+      Key    := Encrypt( IntToStr(IDUser)+FLogin+NewPassword, EncryptKey );
+      FSenha := Decrypt(FieldByName('Senha').asString, EncryptKey);
+      Close;
+      Free;
+    end;
+
+    DataConnector.UCExecSQL('Update ' +
+                              TableUsers.TableName +
+                              ' Set '+TableUsers.FieldPassword+' = '+ QuotedStr(Encrypt(NewPassword, EncryptKey))+', '+
+                              TableUsers.FieldKey + ' = ' +QuotedStr(Key)+
+                              ' where '+TableUsers.FieldUserID+' = '+ IntToStr(IdUser));
+
+    if Assigned(onChangePassword) then
+      OnChangePassword(Self, IdUser, FLogin, FSenha, NewPassword);
+
+   except on E: Exception do
+    begin
+      ShowMessage('Erro ao aplicar permissões: ' + E.Message);
+      EncerrarAplicacao;
+    end;
   end;
-  DataConnector.UCExecSQL('Update ' +  TableUsers.TableName + ' Set '+TableUsers.FieldPassword+' = '+
-    QuotedStr(Encrypt(NewPassword, EncryptKey))+', '+TableUsers.FieldKey + ' = ' +QuotedStr(Key)+
-    ' where '+TableUsers.FieldUserID+' = '+ IntToStr(IdUser));
-  if Assigned(onChangePassword) then OnChangePassword(Self, IdUser, FLogin, FSenha, NewPassword);
 end;
 
 procedure TUserControl.ChangeUser(IDUser: Integer; Login, Name,
@@ -1355,237 +1514,513 @@ procedure TUserControl.ChangeUser(IDUser: Integer; Login, Name,
 var
   Key, Password : String;
 begin
-  with DataConnector.UCGetSQLDataset('Select ' + TableUsers.FieldPassword+
-    ' as senha from ' + TableUsers.TableName+' where '+TableUsers.FieldUserID+' = '+ IntToStr(IdUser)) do
-  begin
-    Password := Decrypt(FieldByName('Senha').asString, EncryptKey);
-    Close;
-    Free;
+  try
+    with DataConnector.UCGetSQLDataset('Select ' +
+           TableUsers.FieldPassword+ ' as senha ' +
+           ' from ' + TableUsers.TableName+
+           ' where '+TableUsers.FieldUserID+' = '+ IntToStr(IdUser)) do
+    begin
+      Password := Decrypt(FieldByName('Senha').asString, EncryptKey);
+      Close;
+      Free;
+    end;
+
+    Key := Encrypt( IntToStr(IDUser)+Login+Password, EncryptKey );
+
+    with TableUsers do
+      DataConnector.UCExecSQL('Update ' +
+        TableName + ' Set '+
+        FieldUserName + ' = '+ QuotedStr(Name)+', '+
+        FieldLogin + ' = '+ QuotedStr(Login)+', '+
+        FieldEmail + ' = '+ QuotedStr(Mail)+', '+
+        FieldPrivileged + ' = '+ BooltoStr(PrivUser)+', '+
+        FieldProfile + ' = '+ IntToStr(Profile)+  ', '+
+        FieldKey + ' = ' + QuotedStr(Key) +
+        ' where '+FieldUserID +' = '+ IntToStr(IdUser));
+
+    if Assigned(OnChangeUser) then
+      OnChangeUser(Self, IdUser, Login, Name, Mail, Profile, PrivUser);
+
+   except on E: Exception do
+    begin
+      ShowMessage('Erro ao aplicar permissões: ' + E.Message);
+      EncerrarAplicacao;
+    end;
   end;
-  Key := Encrypt( IntToStr(IDUser)+Login+Password, EncryptKey );
-
-  with TableUsers do
-    DataConnector.UCExecSQL('Update ' +  TableName + ' Set '+
-      FieldUserName + ' = '+ QuotedStr(Name)+', '+
-      FieldLogin + ' = '+ QuotedStr(Login)+', '+
-      FieldEmail + ' = '+ QuotedStr(Mail)+', '+
-      FieldPrivileged + ' = '+ BooltoStr(PrivUser)+', '+
-      FieldProfile + ' = '+ IntToStr(Profile)+  ', '+
-      FieldKey + ' = ' + QuotedStr(Key) +
-      ' where '+FieldUserID +' = '+ IntToStr(IdUser));
-  if Assigned(OnChangeUser) then OnChangeUser(Self, IdUser, Login, Name, Mail, Profile, PrivUser);
-
 end;
 
 procedure IniSettings(DestSettings: TUserSettings);
 var
   tmp : TBitmap;
 begin
+  try
     with DestSettings.CommonMessages do
     begin
-      if BlankPassword = '' then BlankPassword := Const_Men_SenhaDesabitada;
-      if PasswordChanged = '' then PasswordChanged := Const_Men_SenhaAlterada;
-      if InitialMessage.Text = '' then InitialMessage.Text := Const_Men_MsgInicial;
-      if MaxLoginAttemptsError = '' then MaxLoginAttemptsError := Const_Men_MaxTentativas;
-      if InvalidLogin = '' then InvalidLogin := Const_Men_LoginInvalido;
-      if AutoLogonError = '' then AutoLogonError := Const_Men_AutoLogonError;
+      if BlankPassword = '' then
+        BlankPassword := Const_Men_SenhaDesabitada;
+
+      if PasswordChanged = '' then
+        PasswordChanged := Const_Men_SenhaAlterada;
+
+      if InitialMessage.Text = ''
+        then InitialMessage.Text := Const_Men_MsgInicial;
+
+      if MaxLoginAttemptsError = '' then
+        MaxLoginAttemptsError := Const_Men_MaxTentativas;
+
+      if InvalidLogin = '' then
+        InvalidLogin := Const_Men_LoginInvalido;
+
+      if AutoLogonError = '' then
+        AutoLogonError := Const_Men_AutoLogonError;
     end;
+
     with DestSettings.Login do
     begin
-      if BtCancel = '' then BtCancel := Const_Log_BtCancelar;
-      if BtOK = '' then BtOK := Const_Log_BtOK;
-      if LabelPassword = '' then LabelPassword := Const_Log_LabelSenha;
-      if LabelUser = '' then LabelUser := Const_Log_LabelUsuario;
-      if WindowCaption = '' then WindowCaption := Const_Log_WindowCaption;
+      if BtCancel = '' then
+        BtCancel := Const_Log_BtCancelar;
 
-      Tmp := TBitmap.create;
-      Tmp.LoadFromResourceName(HInstance, 'UCLOCKLOGIN');
-      LeftImage.Assign(tmp);
-      FreeAndNil(tmp);
+      if BtOK = '' then
+        BtOK := Const_Log_BtOK;
 
+      if LabelPassword = '' then
+        LabelPassword := Const_Log_LabelSenha;
+
+      if LabelUser = '' then
+        LabelUser := Const_Log_LabelUsuario;
+
+      if WindowCaption = '' then
+        WindowCaption := Const_Log_WindowCaption;
+
+      try
+        tmp := TBitmap.create;
+        Tmp.LoadFromResourceName(HInstance, 'UCLOCKLOGIN');
+        LeftImage.Assign(tmp);
+      finally
+        FreeAndNil(tmp);
+      end;
     end;
+
     with DestSettings.UsersForm do
     begin
-      if WindowCaption = '' then WindowCaption := Const_Cad_WindowCaption;
-      if LabelDescription = '' then LabelDescription := Const_Cad_LabelDescricao;
-      if ColName = '' then ColName := Const_Cad_ColunaNome;
-      if ColLogin = '' then ColLogin := Const_Cad_ColunaLogin;
-      if ColEmail = '' then ColEmail := Const_Cad_ColunaEmail;
-      if BtAdd = '' then BtAdd := Const_Cad_BtAdicionar;
-      if BtChange = '' then BtChange := Const_Cad_BtAlterar;
-      if BtDelete = '' then BtDelete := Const_Cad_BtExcluir;
-      if BtRights = '' then BtRights := Const_Cad_BtPermissoes;
-      if BtPassword = '' then BtPassword := Const_Cad_BtSenha;
-      if BtClose = '' then BtClose := Const_Cad_BtFechar;
-      if PromptDelete = '' then PromptDelete := Const_Cad_ConfirmaExcluir;
-      if PromptDelete_WindowCaption = '' then PromptDelete_WindowCaption := Const_Cad_ConfirmaDelete_WindowCaption; //added by fduenas
+      if WindowCaption = '' then
+        WindowCaption := Const_Cad_WindowCaption;
 
+      if LabelDescription = '' then
+        LabelDescription := Const_Cad_LabelDescricao;
+
+      if ColName = '' then
+        ColName := Const_Cad_ColunaNome;
+
+      if ColLogin = '' then
+        ColLogin := Const_Cad_ColunaLogin;
+
+      if ColEmail = '' then
+        ColEmail := Const_Cad_ColunaEmail;
+
+      if BtAdd = '' then
+        BtAdd := Const_Cad_BtAdicionar;
+
+      if BtChange = '' then
+        BtChange := Const_Cad_BtAlterar;
+
+      if BtDelete = '' then
+        BtDelete := Const_Cad_BtExcluir;
+
+      if BtRights = '' then
+        BtRights := Const_Cad_BtPermissoes;
+
+      if BtPassword = '' then
+        BtPassword := Const_Cad_BtSenha;
+
+      if BtClose = '' then
+        BtClose := Const_Cad_BtFechar;
+
+      if PromptDelete = '' then
+        PromptDelete := Const_Cad_ConfirmaExcluir;
+
+      if PromptDelete_WindowCaption = '' then
+        PromptDelete_WindowCaption := Const_Cad_ConfirmaDelete_WindowCaption; //added by fduenas
     end;
+
     with DestSettings.UsersProfile do
     begin
-      if WindowCaption = '' then WindowCaption := Const_Prof_WindowCaption;
-      if LabelDescription = '' then LabelDescription := Const_Prof_LabelDescricao;
-      if ColProfile = '' then ColProfile := Const_Prof_ColunaNome;
-      if BtAdd = '' then BtAdd := Const_Prof_BtAdicionar;
-      if BtChange = '' then BtChange := Const_Prof_BtAlterar;
-      if BtDelete = '' then BtDelete := Const_Prof_BtExcluir;
-      if BtRights = '' then BtRights := Const_Prof_BtPermissoes;    //BGM
-      if BtClose = '' then BtClose := Const_Prof_BtFechar;
-      if PromptDelete = '' then PromptDelete := Const_Prof_ConfirmaExcluir;
-      if PromptDelete_WindowCaption = '' then PromptDelete_WindowCaption := Const_Prof_ConfirmaDelete_WindowCaption; //added by fduenas
+      if WindowCaption = '' then
+        WindowCaption := Const_Prof_WindowCaption;
+
+      if LabelDescription = '' then
+        LabelDescription := Const_Prof_LabelDescricao;
+
+      if ColProfile = '' then
+        ColProfile := Const_Prof_ColunaNome;
+
+      if BtAdd = '' then
+        BtAdd := Const_Prof_BtAdicionar;
+
+      if BtChange = '' then
+        BtChange := Const_Prof_BtAlterar;
+
+      if BtDelete = '' then
+        BtDelete := Const_Prof_BtExcluir;
+
+      if BtRights = '' then
+        BtRights := Const_Prof_BtPermissoes;    //BGM
+
+      if BtClose = '' then
+        BtClose := Const_Prof_BtFechar;
+
+      if PromptDelete = '' then
+        PromptDelete := Const_Prof_ConfirmaExcluir;
+
+      if PromptDelete_WindowCaption = '' then
+        PromptDelete_WindowCaption := Const_Prof_ConfirmaDelete_WindowCaption; //added by fduenas
     end;
+
     with DestSettings.AddChangeUser do
     begin
-      if WindowCaption = '' then WindowCaption := Const_Inc_WindowCaption;
-      if LabelAdd = '' then LabelAdd := Const_Inc_LabelAdicionar;
-      if LabelChange = '' then LabelChange := Const_Inc_LabelAlterar;
-      if LabelName = '' then LabelName := Const_Inc_LabelNome;
-      if LabelLogin = '' then LabelLogin := Const_Inc_LabelLogin;
-      if LabelEmail = '' then LabelEmail := Const_Inc_LabelEmail;
-      if LabelPerfil = '' then LabelPerfil := Const_Inc_LabelPerfil;
-      if CheckPrivileged = '' then CheckPrivileged := Const_Inc_CheckPrivilegiado;
-      if BtSave = '' then BtSave := Const_Inc_BtGravar;
-      if BtCancel = '' then BtCancel := Const_Inc_BtCancelar;
+      if WindowCaption = '' then
+        WindowCaption := Const_Inc_WindowCaption;
+
+      if LabelAdd = '' then
+        LabelAdd := Const_Inc_LabelAdicionar;
+
+      if LabelChange = '' then
+        LabelChange := Const_Inc_LabelAlterar;
+
+      if LabelName = '' then
+        LabelName := Const_Inc_LabelNome;
+
+      if LabelLogin = '' then
+        LabelLogin := Const_Inc_LabelLogin;
+
+      if LabelEmail = '' then
+        LabelEmail := Const_Inc_LabelEmail;
+
+      if LabelPerfil = '' then
+        LabelPerfil := Const_Inc_LabelPerfil;
+
+      if CheckPrivileged = '' then
+        CheckPrivileged := Const_Inc_CheckPrivilegiado;
+
+      if BtSave = '' then
+        BtSave := Const_Inc_BtGravar;
+
+      if BtCancel = '' then
+        BtCancel := Const_Inc_BtCancelar;
     end;
+
     with DestSettings.AddChangeProfile do
     begin
-      if WindowCaption = '' then WindowCaption := Const_PInc_WindowCaption;
-      if LabelAdd = '' then LabelAdd := Const_PInc_LabelAdicionar;
-      if LabelChange = '' then LabelChange := Const_PInc_LabelAlterar;
-      if LabelName = '' then LabelName := Const_PInc_LabelNome;
-      if BtSave = '' then BtSave := Const_PInc_BtGravar;
-      if BtCancel = '' then BtCancel := Const_PInc_BtCancelar;
+      if WindowCaption = '' then
+        WindowCaption := Const_PInc_WindowCaption;
+
+      if LabelAdd = '' then
+        LabelAdd := Const_PInc_LabelAdicionar;
+
+      if LabelChange = '' then
+        LabelChange := Const_PInc_LabelAlterar;
+
+      if LabelName = '' then
+        LabelName := Const_PInc_LabelNome;
+
+      if BtSave = '' then
+        BtSave := Const_PInc_BtGravar;
+
+      if BtCancel = '' then
+        BtCancel := Const_PInc_BtCancelar;
     end;
+
     with DestSettings.Rights do
     begin
-      if WindowCaption = '' then WindowCaption := Const_Perm_WindowCaption;
-      if LabelUser = '' then LabelUser := Const_Perm_LabelUsuario;
-      if LabelProfile = '' then LabelProfile := Const_Perm_LabelPerfil;
-      if PageMenu = '' then PageMenu := Const_Perm_PageMenu;
-      if PageActions = '' then PageActions := Const_Perm_PageActions;
-      if BtUnlock = '' then BtUnlock := Const_Perm_BtLibera;
-      if BtLock = '' then BtLock := Const_Perm_BtBloqueia;
-      if BtSave = '' then BtSave := Const_Perm_BtGravar;
-      if BtCancel = '' then BtCancel := Const_Perm_BtCancelar;
+      if WindowCaption = '' then
+        WindowCaption := Const_Perm_WindowCaption;
+
+      if LabelUser = '' then
+        LabelUser := Const_Perm_LabelUsuario;
+
+      if LabelProfile = '' then
+        LabelProfile := Const_Perm_LabelPerfil;
+
+      if PageMenu = '' then
+        PageMenu := Const_Perm_PageMenu;
+
+      if PageActions = '' then
+        PageActions := Const_Perm_PageActions;
+
+      if BtUnlock = '' then
+        BtUnlock := Const_Perm_BtLibera;
+
+      if BtLock = '' then
+        BtLock := Const_Perm_BtBloqueia;
+
+      if BtSave = '' then
+        BtSave := Const_Perm_BtGravar;
+
+      if BtCancel = '' then
+        BtCancel := Const_Perm_BtCancelar;
     end;
+
     with DestSettings.ChangePassword do
     begin
-      if WindowCaption = '' then WindowCaption := Const_Troc_WindowCaption;
-      if LabelDescription = '' then LabelDescription := Const_Troc_LabelDescricao;
-      if LabelCurrentPassword = '' then LabelCurrentPassword := Const_Troc_LabelSenhaAtual;
-      if LabelNewPassword = '' then LabelNewPassword := Const_Troc_LabelNovaSenha;
-      if LabelConfirm = '' then LabelConfirm := Const_Troc_LabelConfirma;
-      if BtSave = '' then BtSave := Const_Troc_BtGravar;
-      if BtCancel = '' then BtCancel := Const_Troc_BtCancelar;
+      if WindowCaption = '' then
+        WindowCaption := Const_Troc_WindowCaption;
+
+      if LabelDescription = '' then
+        LabelDescription := Const_Troc_LabelDescricao;
+
+      if LabelCurrentPassword = '' then
+        LabelCurrentPassword := Const_Troc_LabelSenhaAtual;
+
+      if LabelNewPassword = '' then
+        LabelNewPassword := Const_Troc_LabelNovaSenha;
+
+      if LabelConfirm = '' then
+        LabelConfirm := Const_Troc_LabelConfirma;
+
+      if BtSave = '' then
+        BtSave := Const_Troc_BtGravar;
+
+      if BtCancel = '' then
+        BtCancel := Const_Troc_BtCancelar;
     end;
+
     with DestSettings.CommonMessages.ChangePasswordError do
     begin
-      if InvalidCurrentPassword = '' then InvalidCurrentPassword :=  Const_ErrPass_SenhaAtualInvalida;
-      if NewPasswordError = '' then NewPasswordError :=  Const_ErrPass_ErroNovaSenha;
-      if NewEqualCurrent = '' then NewEqualCurrent :=  Const_ErrPass_NovaIgualAtual;
-      if PasswordRequired = '' then PasswordRequired :=  Const_ErrPass_SenhaObrigatoria;
-      if MinPasswordLength = '' then MinPasswordLength := Const_ErrPass_SenhaMinima;
-      if InvalidNewPassword= '' then InvalidNewPassword :=  Const_ErrPass_SenhaInvalida;
+      if InvalidCurrentPassword = '' then
+        InvalidCurrentPassword :=  Const_ErrPass_SenhaAtualInvalida;
+
+      if NewPasswordError = '' then
+        NewPasswordError :=  Const_ErrPass_ErroNovaSenha;
+
+      if NewEqualCurrent = '' then
+        NewEqualCurrent :=  Const_ErrPass_NovaIgualAtual;
+
+      if PasswordRequired = '' then
+        PasswordRequired :=  Const_ErrPass_SenhaObrigatoria;
+
+      if MinPasswordLength = '' then
+        MinPasswordLength := Const_ErrPass_SenhaMinima;
+
+      if InvalidNewPassword= '' then
+        InvalidNewPassword :=  Const_ErrPass_SenhaInvalida;
     end;
+
     with DestSettings.ResetPassword do
     begin
-      if WindowCaption = '' then WindowCaption := Const_DefPass_WindowCaption;
-      if LabelPassword = '' then LabelPassword := Const_DefPass_LabelSenha;
+      if WindowCaption = '' then
+        WindowCaption := Const_DefPass_WindowCaption;
+
+      if LabelPassword = '' then
+        LabelPassword := Const_DefPass_LabelSenha;
     end;
+
     with DestSettings.Log do
     begin
-      if WindowCaption = '' then WindowCaption := Const_LogC_WindowCaption;
-      if LabelDescription = '' then LabelDescription := Const_LogC_LabelDescricao;
-      if LabelUser = '' then LabelUser := Const_LogC_LabelUsuario;
-      if LabelDate = '' then LabelDate := Const_LogC_LabelData;
-      if LabelLevel = '' then LabelLevel := Const_LogC_LabelNivel;
-      if ColLevel = '' then ColLevel := Const_LogC_ColunaNivel;
-      if ColMessage = '' then ColMessage := Const_LogC_ColunaMensagem;
-      if ColUser = '' then ColUser := Const_LogC_ColunaUsuario;
-      if ColDate = '' then ColDate := Const_LogC_ColunaData;
-      if BtFilter = '' then BtFilter := Const_LogC_BtFiltro;
-      if BtDelete = '' then BtDelete := Const_LogC_BtExcluir;
-      if BtClose = '' then BtClose := Const_LogC_BtFechar;
-      if PromptDelete = '' then PromptDelete := Const_LogC_ConfirmaExcluir;
-      if PromptDelete_WindowCaption = '' then PromptDelete_WindowCaption := Const_LogC_ConfirmaDelete_WindowCaption; //added by fduenas
-      if OptionUserAll = '' then OptionUserAll := Const_LogC_Todos; //added by fduenas
-      if OptionLevelLow = '' then OptionLevelLow := Const_LogC_Low; //added by fduenas
-      if OptionLevelNormal = '' then OptionLevelNormal := Const_LogC_Normal; //added by fduenas
-      if OptionLevelHigh = '' then OptionLevelHigh := Const_LogC_High; //added by fduenas
-      if OptionLevelCritic = '' then OptionLevelCritic := Const_LogC_Critic; //added by fduenas
-      if DeletePerformed = '' then DeletePerformed := Const_LogC_ExcluirEfectuada; //added by fduenas
+      if WindowCaption = '' then
+        WindowCaption := Const_LogC_WindowCaption;
+
+      if LabelDescription = '' then
+        LabelDescription := Const_LogC_LabelDescricao;
+
+      if LabelUser = '' then
+        LabelUser := Const_LogC_LabelUsuario;
+
+      if LabelDate = '' then
+        LabelDate := Const_LogC_LabelData;
+
+      if LabelLevel = '' then
+        LabelLevel := Const_LogC_LabelNivel;
+
+      if ColLevel = '' then
+        ColLevel := Const_LogC_ColunaNivel;
+
+      if ColMessage = '' then
+        ColMessage := Const_LogC_ColunaMensagem;
+
+      if ColUser = '' then
+        ColUser := Const_LogC_ColunaUsuario;
+
+      if ColDate = '' then
+        ColDate := Const_LogC_ColunaData;
+
+      if BtFilter = '' then
+        BtFilter := Const_LogC_BtFiltro;
+
+      if BtDelete = '' then
+        BtDelete := Const_LogC_BtExcluir;
+
+      if BtClose = '' then
+        BtClose := Const_LogC_BtFechar;
+
+      if PromptDelete = '' then
+        PromptDelete := Const_LogC_ConfirmaExcluir;
+
+      if PromptDelete_WindowCaption = '' then
+        PromptDelete_WindowCaption := Const_LogC_ConfirmaDelete_WindowCaption; //added by fduenas
+
+      if OptionUserAll = '' then
+        OptionUserAll := Const_LogC_Todos; //added by fduenas
+
+      if OptionLevelLow = '' then
+        OptionLevelLow := Const_LogC_Low; //added by fduenas
+
+      if OptionLevelNormal = '' then
+        OptionLevelNormal := Const_LogC_Normal; //added by fduenas
+
+      if OptionLevelHigh = '' then
+        OptionLevelHigh := Const_LogC_High; //added by fduenas
+
+      if OptionLevelCritic = '' then
+        OptionLevelCritic := Const_LogC_Critic; //added by fduenas
+
+      if DeletePerformed = '' then
+        DeletePerformed := Const_LogC_ExcluirEfectuada; //added by fduenas
     end;
+
     with DestSettings.AppMessages do
     begin
-      if MsgsForm_BtNew = '' then MsgsForm_BtNew := Const_Msgs_BtNew;
-      if MsgsForm_BtReplay = '' then MsgsForm_BtReplay := Const_Msgs_BtReplay;
-      if MsgsForm_BtForward = '' then MsgsForm_BtForward := Const_Msgs_BtForward;
-      if MsgsForm_BtDelete = '' then MsgsForm_BtDelete := Const_Msgs_BtDelete;
-      if MsgsForm_BtClose = '' then MsgsForm_BtDelete := Const_Msgs_BtClose; //added by fduenas
-      if MsgsForm_WindowCaption = '' then MsgsForm_WindowCaption := Const_Msgs_WindowCaption;
-      if MsgsForm_ColFrom = '' then  MsgsForm_ColFrom := Const_Msgs_ColFrom;
-      if MsgsForm_ColSubject = '' then  MsgsForm_ColSubject := Const_Msgs_ColSubject;
-      if MsgsForm_ColDate = '' then MsgsForm_ColDate := Const_Msgs_ColDate;
-      if MsgsForm_PromptDelete = '' then  MsgsForm_PromptDelete := Const_Msgs_PromptDelete;
-      if MsgsForm_PromptDelete_WindowCaption = '' then  MsgsForm_PromptDelete_WindowCaption := Const_Msgs_PromptDelete_WindowCaption;
-      if MsgsForm_NoMessagesSelected = '' then  MsgsForm_NoMessagesSelected := Const_Msgs_NoMessagesSelected;
-      if MsgsForm_NoMessagesSelected_WindowCaption = '' then  MsgsForm_NoMessagesSelected_WindowCaption := Const_Msgs_NoMessagesSelected_WindowCaption;
+      if MsgsForm_BtNew = '' then
+        MsgsForm_BtNew := Const_Msgs_BtNew;
 
-      if MsgRec_BtClose = '' then  MsgRec_BtClose := Const_MsgRec_BtClose;
-      if MsgRec_WindowCaption = '' then MsgRec_WindowCaption := Const_MsgRec_WindowCaption;
-      if MsgRec_Title = ''then MsgRec_Title := Const_MsgRec_Title;
-      if MsgRec_LabelFrom = ''then MsgRec_LabelFrom := Const_MsgRec_LabelFrom;
-      if MsgRec_LabelDate = '' then MsgRec_LabelDate := Const_MsgRec_LabelDate;
-      if MsgRec_LabelSubject = '' then MsgRec_LabelSubject := Const_MsgRec_LabelSubject;
-      if MsgRec_LabelMessage = '' then MsgRec_LabelMessage := Const_MsgRec_LabelMessage;
+      if MsgsForm_BtReplay = '' then
+        MsgsForm_BtReplay := Const_Msgs_BtReplay;
 
-      if MsgSend_BtSend =  '' then MsgSend_BtSend := Const_MsgSend_BtSend;
-      if MsgSend_BtCancel = '' then MsgSend_BtCancel := Const_MsgSend_BtCancel;
-      if MsgSend_WindowCaption = '' then MsgSend_WindowCaption := Const_MsgSend_WindowCaption;
-      if MsgSend_Title = '' then MsgSend_Title := Const_MsgSend_Title;
-      if MsgSend_GroupTo = '' then MsgSend_GroupTo := Const_MsgSend_GroupTo;
-      if MsgSend_RadioUser = '' then MsgSend_RadioUser := Const_MsgSend_RadioUser;
-      if MsgSend_RadioAll = '' then MsgSend_RadioAll := Const_MsgSend_RadioAll;
-      if MsgSend_GroupMessage = '' then MsgSend_GroupMessage := Const_MsgSend_GroupMessage;
-      if MsgSend_LabelSubject = '' then MsgSend_LabelSubject := Const_MsgSend_LabelSubject; //added by fduenas
-      if MsgSend_LabelMessageText = '' then MsgSend_LabelMessageText := Const_MsgSend_LabelMessageText; //added by fduenas
+      if MsgsForm_BtForward = '' then
+        MsgsForm_BtForward := Const_Msgs_BtForward;
+
+      if MsgsForm_BtDelete = '' then
+        MsgsForm_BtDelete := Const_Msgs_BtDelete;
+
+      if MsgsForm_BtClose = '' then
+        MsgsForm_BtDelete := Const_Msgs_BtClose; //added by fduenas
+
+      if MsgsForm_WindowCaption = '' then
+        MsgsForm_WindowCaption := Const_Msgs_WindowCaption;
+
+      if MsgsForm_ColFrom = '' then
+        MsgsForm_ColFrom := Const_Msgs_ColFrom;
+
+      if MsgsForm_ColSubject = '' then
+        MsgsForm_ColSubject := Const_Msgs_ColSubject;
+
+      if MsgsForm_ColDate = '' then
+        MsgsForm_ColDate := Const_Msgs_ColDate;
+
+      if MsgsForm_PromptDelete = '' then
+        MsgsForm_PromptDelete := Const_Msgs_PromptDelete;
+
+      if MsgsForm_PromptDelete_WindowCaption = '' then
+        MsgsForm_PromptDelete_WindowCaption := Const_Msgs_PromptDelete_WindowCaption;
+
+      if MsgsForm_NoMessagesSelected = '' then
+        MsgsForm_NoMessagesSelected := Const_Msgs_NoMessagesSelected;
+
+      if MsgsForm_NoMessagesSelected_WindowCaption = '' then
+        MsgsForm_NoMessagesSelected_WindowCaption := Const_Msgs_NoMessagesSelected_WindowCaption;
+
+      if MsgRec_BtClose = '' then
+        MsgRec_BtClose := Const_MsgRec_BtClose;
+
+      if MsgRec_WindowCaption = '' then
+        MsgRec_WindowCaption := Const_MsgRec_WindowCaption;
+
+      if MsgRec_Title = ''then
+        MsgRec_Title := Const_MsgRec_Title;
+
+      if MsgRec_LabelFrom = ''then
+        MsgRec_LabelFrom := Const_MsgRec_LabelFrom;
+
+      if MsgRec_LabelDate = '' then
+        MsgRec_LabelDate := Const_MsgRec_LabelDate;
+
+      if MsgRec_LabelSubject = '' then
+        MsgRec_LabelSubject := Const_MsgRec_LabelSubject;
+
+      if MsgRec_LabelMessage = '' then
+        MsgRec_LabelMessage := Const_MsgRec_LabelMessage;
+
+      if MsgSend_BtSend =  '' then
+        MsgSend_BtSend := Const_MsgSend_BtSend;
+
+      if MsgSend_BtCancel = '' then
+        MsgSend_BtCancel := Const_MsgSend_BtCancel;
+
+      if MsgSend_WindowCaption = '' then
+        MsgSend_WindowCaption := Const_MsgSend_WindowCaption;
+
+      if MsgSend_Title = '' then
+        MsgSend_Title := Const_MsgSend_Title;
+
+      if MsgSend_GroupTo = '' then
+        MsgSend_GroupTo := Const_MsgSend_GroupTo;
+
+      if MsgSend_RadioUser = '' then
+        MsgSend_RadioUser := Const_MsgSend_RadioUser;
+
+      if MsgSend_RadioAll = '' then
+        MsgSend_RadioAll := Const_MsgSend_RadioAll;
+
+      if MsgSend_GroupMessage = '' then
+        MsgSend_GroupMessage := Const_MsgSend_GroupMessage;
+
+      if MsgSend_LabelSubject = '' then
+        MsgSend_LabelSubject := Const_MsgSend_LabelSubject; //added by fduenas
+
+      if MsgSend_LabelMessageText = '' then
+        MsgSend_LabelMessageText := Const_MsgSend_LabelMessageText; //added by fduenas
     end;
    //c DestSettings.WindowsPosition := poMainFormCenter;
+   except on E: Exception do
+    begin
+      ShowMessage('Erro ao aplicar permissões: ' + E.Message);
+      EncerrarAplicacao;
+    end;
+  end;
 end;
-
 
 procedure TUserControl.CriaTabelaMsgs(const TableName : String);
 begin
-  DataConnector.UCExecSQL('Create Table '+ TableName + ' ( '+
-                         'IdMsg int ,'+
-                         'UsrFrom int, '+
-                         'UsrTo int, '+
-                         'Subject Varchar(50),'+
-                         'Msg Varchar(255),'+
-                         'DtSend Varchar(12),'+
-                         'DtReceive Varchar(12) )');
+  try
+    DataConnector.UCExecSQL('Create Table '+ TableName + ' ( '+
+                            'IdMsg int ,'+
+                            'UsrFrom int, '+
+                            'UsrTo int, '+
+                            'Subject Varchar(50),'+
+                            'Msg Varchar(255),'+
+                            'DtSend Varchar(12),'+
+                            'DtReceive Varchar(12) )');
+   except on E: Exception do
+    begin
+      ShowMessage('Erro ao aplicar permissões: ' + E.Message);
+      EncerrarAplicacao;
+    end;
+  end;
 end;
 
 destructor TUserControl.Destroy;
 begin
-  //Free method changes to FreeAndNil function
-  //modified by fduenas
-  FRightItems.Free;
-  FreeAndNil(FUser);
-  ControlRight.Free;
-  Login.free;
-  LogControl.Free ;
-  UsersForm.Free ;
-  UsersProfile.Free;
-  ChangePasswordForm.Free;
-  FUserSettings.Free;
-  FNaoPermitidos.Free;
-  UCControlList.Free;
-  LoginMonitorList.Free;
-  // QmD 19/04/2005
-  FreeAndNil(FTableUsers);
-  FreeAndNil(FTableRights);
-  inherited Destroy;
+  try
+    FRightItems.Free;
+    FreeAndNil(FUser);
+    ControlRight.Free;
+    Login.free;
+    LogControl.Free ;
+    UsersForm.Free ;
+    UsersProfile.Free;
+    ChangePasswordForm.Free;
+    FUserSettings.Free;
+    FNaoPermitidos.Free;
+    UCControlList.Free;
+    LoginMonitorList.Free;
+    FreeAndNil(FTableUsers);
+    FreeAndNil(FTableRights);
+    inherited Destroy;
+   except on E: Exception do
+    begin
+      ShowMessage('Erro ao aplicar permissões: ' + E.Message);
+      EncerrarAplicacao;
+    end;
+  end;
 end;
 
 procedure TUserControl.SetItems(Value: TUCCollection);
@@ -1601,29 +2036,55 @@ end;
 
 procedure TUserControl.StartLogin;
 begin
-  CurrentUser.UserID := 0;
-  ShowLogin;
-  ApplyRights;
+  try
+    LimpaDadosUsuario;
+    //CurrentUser.UserID := 0;
+    ShowLogin;
+    ApplyRights;
+   except on E: Exception do
+    begin
+      ShowMessage('Erro ao aplicar permissões: ' + E.Message);
+      EncerrarAplicacao;
+    end;
+  end;
 end;
 
 procedure TUserControl.Execute;
 begin
-//    if not UCFindDataConnection then raise Exception.Create(Format(msgExceptConnection,[name]));
-  if Assigned(FThUCRun) then FThUCRun.Terminate;
   try
-    if not DataConnector.UCFindTable(FTableRights.TableName) then CriaTableRights;
-    if not DataConnector.UCFindTable(FTableRights.TableName+'EX') then CriaTableRights(True); //extra rights table
-    if LogControl.Active then
-      if not DataConnector.UCFindTable(LogControl.TableLog) then CriaTableLog;
+     //    if not UCFindDataConnection then raise Exception.Create(Format(msgExceptConnection,[name]));
+    if Assigned(FThUCRun) then
+      FThUCRun.Terminate;
 
-    CriaTabelaUsuarios(DataConnector.UCFindTable(FTableUsers.TableName));
+    try
+      if not DataConnector.UCFindTable(FTableRights.TableName) then
+        CriaTableRights;
 
-    // testa campo KEY qmd 28-02-2005
-    if FTryKeyField then DoCheckValidationField;
-  finally
-    if LoginMode = lmActive then
-      if not Login.AutoLogon.Active then ShowLogin else TryAutoLogon;
-    ApplyRights;
+      if not DataConnector.UCFindTable(FTableRights.TableName+'EX') then
+        CriaTableRights(True); //extra rights table
+
+      if LogControl.Active then
+        if not DataConnector.UCFindTable(LogControl.TableLog) then
+          CriaTableLog;
+
+      CriaTabelaUsuarios(DataConnector.UCFindTable(FTableUsers.TableName));
+
+      // testa campo KEY qmd 28-02-2005
+      if FTryKeyField then
+        DoCheckValidationField;
+    finally
+      if LoginMode = lmActive then
+        if not Login.AutoLogon.Active then
+          ShowLogin
+        else
+          TryAutoLogon;
+      ApplyRights;
+    end;
+   except on E: Exception do
+    begin
+      ShowMessage('Erro ao aplicar permissões: ' + E.Message);
+      EncerrarAplicacao;
+    end;
   end;
 end;
 
@@ -1633,182 +2094,257 @@ var
   Key, Login, Senha : String;
   UserID : Integer;
 begin
-  //verifica tabela de usuarios
-  TempDS := DataConnector.UCGetSQLDataset('SELECT * FROM '+TableUsers.TableName);
-  if TempDS.FindField(TableUsers.FieldKey) = nil then
-  begin
-    DataConnector.UCExecSQL('ALTER TABLE ' + TableUsers.TableName + ' ADD ' +
-       TableUsers.FieldKey + ' VARCHAR(255)');
-    TempDS.First;
-    with TempDS do
+  try
+    //verifica tabela de usuarios
+    TempDS := DataConnector.UCGetSQLDataset('SELECT * FROM '+
+                TableUsers.TableName);
+
+    if TempDS.FindField(TableUsers.FieldKey) = nil then
     begin
-      while not Eof do
+      DataConnector.UCExecSQL('ALTER TABLE ' +
+        TableUsers.TableName + ' ADD ' +
+        TableUsers.FieldKey + ' VARCHAR(255)');
+
+      TempDS.First;
+
+      with TempDS do
       begin
-        UserID := TempDS.FieldByName(TableUsers.FieldUserID).AsInteger;
-        Login := TempDS.FieldByName(TableUsers.FieldLogin).AsString;
-        Senha := Decrypt(TempDS.FieldByName(TableUsers.FieldPassword).AsString, EncryptKey);
-        Key := Encrypt( IntToStr(UserID)+ Login +Senha, EncryptKey );
-        DataConnector.UCExecSQL(Format('UPDATE %s SET %s = %s where %s = %d', [ TableUsers.TableName,
-           TableUsers.FieldKey, QuotedStr(Key),
-           TableUsers.FieldUserID, TempDS.FieldByName(TableUsers.FieldUserID).AsInteger]));
-        Next;
+        while not Eof do
+        begin
+          UserID := TempDS.FieldByName(TableUsers.FieldUserID).AsInteger;
+          Login  := TempDS.FieldByName(TableUsers.FieldLogin).AsString;
+          Senha  := Decrypt(TempDS.FieldByName(TableUsers.FieldPassword).AsString, EncryptKey);
+          Key    := Encrypt( IntToStr(UserID)+ Login +Senha, EncryptKey );
+          DataConnector.UCExecSQL(Format('UPDATE %s SET %s = %s where %s = %d', [ TableUsers.TableName,
+             TableUsers.FieldKey, QuotedStr(Key),
+             TableUsers.FieldUserID, TempDS.FieldByName(TableUsers.FieldUserID).AsInteger]));
+          Next;
+        end;
       end;
     end;
-  end;
-  TempDS.Close;
-  FreeAndNil(TempDS);
+    TempDS.Close;
+    FreeAndNil(TempDS);
 
-  //verifica tabela de permissoes
-  TempDS := DataConnector.UCGetSQLDataset('SELECT * FROM '+TableRights.TableName);
-  if TempDS.FindField(TableRights.FieldKey) = nil then
-  begin
-    DataConnector.UCExecSQL('ALTER TABLE ' + TableRights.TableName + ' ADD ' +
-       TableUsers.FieldKey + ' VARCHAR(255)');
-    TempDS.First;
-    with TempDS do
+    //verifica tabela de permissoes
+    TempDS := DataConnector.UCGetSQLDataset('SELECT '+
+                ' * FROM '+TableRights.TableName);
+
+    if TempDS.FindField(TableRights.FieldKey) = nil then
     begin
-      while not Eof do
+      DataConnector.UCExecSQL('ALTER TABLE ' + TableRights.TableName + ' ADD ' +
+         TableUsers.FieldKey + ' VARCHAR(255)');
+      TempDS.First;
+
+      with TempDS do
       begin
-        UserID := TempDS.FieldByName(TableRights.FieldUserID).AsInteger;
-        Login := TempDS.FieldByName(TableRights.FieldComponentName).AsString;
-        Key := Encrypt(IntToStr(UserID) + Login, EncryptKey);
-        DataConnector.UCExecSQL(Format('UPDATE %s SET %s = %s where %s = %d and %s = %s and %s = %s', [ TableRights.TableName,
-           TableRights.FieldKey, QuotedStr(Key),
-           TableRights.FieldUserID, TempDS.FieldByName(TableRights.FieldUserID).AsInteger,
-           TableRights.FieldModule, QuotedStr(ApplicationID),
-           TableRights.FieldComponentName, QuotedStr(Login)]));
-        Next;
+        while not Eof do
+        begin
+          UserID := TempDS.FieldByName(TableRights.FieldUserID).AsInteger;
+          Login := TempDS.FieldByName(TableRights.FieldComponentName).AsString;
+          Key := Encrypt(IntToStr(UserID) + Login, EncryptKey);
+          DataConnector.UCExecSQL(Format('UPDATE %s SET %s = %s where %s = %d and %s = %s and %s = %s', [ TableRights.TableName,
+             TableRights.FieldKey, QuotedStr(Key),
+             TableRights.FieldUserID, TempDS.FieldByName(TableRights.FieldUserID).AsInteger,
+             TableRights.FieldModule, QuotedStr(ApplicationID),
+             TableRights.FieldComponentName, QuotedStr(Login)]));
+          Next;
+        end;
       end;
     end;
-  end;
-  TempDS.Close;
-  FreeAndNil(TempDS);
+    TempDS.Close;
+    FreeAndNil(TempDS);
 
-  //verifica tabela de permissoes extendidas
-  TempDS := DataConnector.UCGetSQLDataset('SELECT * FROM '+TableRights.TableName+'EX');
-  if TempDS.FindField(TableRights.FieldKey) = nil then
-  begin
-    DataConnector.UCExecSQL('ALTER TABLE ' + TableRights.TableName + 'EX ADD ' +
-       TableUsers.FieldKey + ' VARCHAR(255)');
-    TempDS.First;
-    with TempDS do
+    //verifica tabela de permissoes extendidas
+    TempDS := DataConnector.UCGetSQLDataset('SELECT '+
+                ' * FROM '+TableRights.TableName+'EX');
+
+    if TempDS.FindField(TableRights.FieldKey) = nil then
     begin
-      while not Eof do
+      DataConnector.UCExecSQL('ALTER TABLE ' + TableRights.TableName + 'EX ADD ' +
+         TableUsers.FieldKey + ' VARCHAR(255)');
+      TempDS.First;
+
+      with TempDS do
       begin
-        UserID := TempDS.FieldByName(TableRights.FieldUserID).AsInteger;
-        Login := TempDS.FieldByName(TableRights.FieldComponentName).AsString; //componentname
-        senha := TempDS.FieldByName(TableRights.FieldFormName).AsString; // formname
-        Key := Encrypt(IntToStr(UserID) + Login, EncryptKey);
-        DataConnector.UCExecSQL(Format('UPDATE %s SET %s = %s where %s = %d and %s = %s and %s = %s and %s = %s', [ TableRights.TableName + 'EX',
-           TableRights.FieldKey, QuotedStr(Key),
-           TableRights.FieldUserID, TempDS.FieldByName(TableRights.FieldUserID).AsInteger,
-           TableRights.FieldModule, QuotedStr(ApplicationID),
-           TableRights.FieldComponentName, QuotedStr(Login), // componente name
-           TableRights.FieldFormName, QuotedStr(Senha) ])); // formname
-        Next;
+        while not Eof do
+        begin
+          UserID := TempDS.FieldByName(TableRights.FieldUserID).AsInteger;
+          Login  := TempDS.FieldByName(TableRights.FieldComponentName).AsString; //componentname
+          senha  := TempDS.FieldByName(TableRights.FieldFormName).AsString; // formname
+          Key    := Encrypt(IntToStr(UserID) + Login, EncryptKey);
+
+          DataConnector.UCExecSQL(Format('UPDATE %s SET %s = %s where %s = %d and %s = %s and %s = %s and %s = %s', [ TableRights.TableName + 'EX',
+             TableRights.FieldKey, QuotedStr(Key),
+             TableRights.FieldUserID, TempDS.FieldByName(TableRights.FieldUserID).AsInteger,
+             TableRights.FieldModule, QuotedStr(ApplicationID),
+             TableRights.FieldComponentName, QuotedStr(Login), // componente name
+             TableRights.FieldFormName, QuotedStr(Senha) ])); // formname
+          Next;
+        end;
       end;
     end;
+    TempDS.Close;
+    FreeAndNil(TempDS);
+   except on E: Exception do
+    begin
+      ShowMessage('Erro ao aplicar permissões: ' + E.Message);
+      EncerrarAplicacao;
+    end;
   end;
-  TempDS.Close;
-  FreeAndNil(TempDS);
-
-
 end;
 
 procedure TUserControl.ActionBtPermissDefault;
 var
   TempCampos, TempCamposEX : String;
 begin
-  UserPermis.TempIdUser := TCadUser(FormCadastroUsuarios).DSCadUser.FieldByName('IdUser').asInteger;
+  try
+    UserPermis.TempIdUser := TCadUser(FormCadastroUsuarios).DSCadUser.FieldByName('IdUser').asInteger;
 
-  TempCampos := Format(' %s as IdUser, %s as Modulo, %s as ObjName, %s as UCKey ', [TableRights.FieldUserID, TableRights.FieldModule, TableRights.FieldComponentName, TableRights.FieldKey]);
-  TempCamposEX := Format('%s, %s as FormName ',[TempCampos, TableRights.FieldFormName]);
+    TempCampos := Format(' %s as IdUser, %s as Modulo, %s as ObjName, %s as UCKey ', [TableRights.FieldUserID, TableRights.FieldModule, TableRights.FieldComponentName, TableRights.FieldKey]);
+    TempCamposEX := Format('%s, %s as FormName ',[TempCampos, TableRights.FieldFormName]);
 
-  UserPermis.DSPermiss := DataConnector.UCGetSQLDataset(Format('Select %s from %s tab Where tab.%s = %s and tab.%s = %s',
-                          [TempCampos, TableRights.TableName, TableRights.FieldUserID, TCadUser(FormCadastroUsuarios).DSCadUser.FieldByName('IdUser').asString, TableRights.FieldModule, QuotedStr(ApplicationID)]) );
-  UserPermis.DSPermiss.Open;
+    UserPermis.DSPermiss := DataConnector.UCGetSQLDataset(Format('Select %s from %s tab Where tab.%s = %s and tab.%s = %s',
+                            [TempCampos, TableRights.TableName, TableRights.FieldUserID, TCadUser(FormCadastroUsuarios).DSCadUser.FieldByName('IdUser').asString, TableRights.FieldModule, QuotedStr(ApplicationID)]) );
+    UserPermis.DSPermiss.Open;
 
-  UserPermis.DSPermissEX := DataConnector.UCGetSQLDataset(Format('Select %s from %s tab1 Where tab1.%s = %s and tab1.%s = %s',
-                          [TempCamposEX, TableRights.TableName + 'EX', TableRights.FieldUserID, TCadUser(FormCadastroUsuarios).DSCadUser.FieldByName('IdUser').asString, TableRights.FieldModule, QuotedStr(ApplicationID)]) );
-  UserPermis.DSPermissEX.Open;
+    UserPermis.DSPermissEX := DataConnector.UCGetSQLDataset(Format('Select %s from %s tab1 Where tab1.%s = %s and tab1.%s = %s',
+                            [TempCamposEX, TableRights.TableName + 'EX', TableRights.FieldUserID, TCadUser(FormCadastroUsuarios).DSCadUser.FieldByName('IdUser').asString, TableRights.FieldModule, QuotedStr(ApplicationID)]) );
+    UserPermis.DSPermissEX.Open;
 
-  UserPermis.DSPerfil := DataConnector.UCGetSQLDataset(Format('Select %s from %s tab Where tab.%s = %s and tab.%s = %s',
-                          [TempCampos, TableRights.TableName, TableRights.FieldUserID, TCadUser(FormCadastroUsuarios).DSCadUser.FieldByName('Perfil').asString, TableRights.FieldModule, QuotedStr(ApplicationID)]) );
-  UserPermis.DSPerfil.Open;
+    UserPermis.DSPerfil := DataConnector.UCGetSQLDataset(Format('Select %s from %s tab Where tab.%s = %s and tab.%s = %s',
+                            [TempCampos, TableRights.TableName, TableRights.FieldUserID, TCadUser(FormCadastroUsuarios).DSCadUser.FieldByName('Perfil').asString, TableRights.FieldModule, QuotedStr(ApplicationID)]) );
+    UserPermis.DSPerfil.Open;
 
-  UserPermis.DSPerfilEX := DataConnector.UCGetSQLDataset(Format('Select %s from %s tab1 Where tab1.%s = %s and tab1.%s = %s',
-                          [TempCamposEX, TableRights.TableName + 'EX', TableRights.FieldUserID, TCadUser(FormCadastroUsuarios).DSCadUser.FieldByName('Perfil').asString, TableRights.FieldModule, QuotedStr(ApplicationID)]) );
-  UserPermis.DSPerfilEX.Open;
+    UserPermis.DSPerfilEX := DataConnector.UCGetSQLDataset(Format('Select %s from %s tab1 Where tab1.%s = %s and tab1.%s = %s',
+                            [TempCamposEX, TableRights.TableName + 'EX', TableRights.FieldUserID, TCadUser(FormCadastroUsuarios).DSCadUser.FieldByName('Perfil').asString, TableRights.FieldModule, QuotedStr(ApplicationID)]) );
+    UserPermis.DSPerfilEX.Open;
 
-  UserPermis.ShowModal;
+    UserPermis.ShowModal;
 
+    TCadUser(FormCadastroUsuarios).DSCadUser.Close;
+    TCadUser(FormCadastroUsuarios).DSCadUser.Open;
 
-  TCadUser(FormCadastroUsuarios).DSCadUser.Close;
-  TCadUser(FormCadastroUsuarios).DSCadUser.Open;
+    TCadUser(FormCadastroUsuarios).DSCadUser.Locate('idUser', UserPermis.TempIdUser,[]);
 
-  TCadUser(FormCadastroUsuarios).DSCadUser.Locate('idUser', UserPermis.TempIdUser,[]);
-
-  FreeAndNil(UserPermis);
+    FreeAndNil(UserPermis);
+   except on E: Exception do
+    begin
+      ShowMessage('Erro ao aplicar permissões: ' + E.Message);
+      EncerrarAplicacao;
+    end;
+  end;
 end;
 
 procedure TUserControl.ActionBtPermissProfileDefault;
 var
   TempCampos, TempCamposEX : String;
 begin
-  UserPermis.TempIdUser := TCadPerfil(FormPerfilUsuarios).DSPerfilUser.FieldByName('IdUser').asInteger;
+  try
+    UserPermis.TempIdUser := TCadPerfil(FormPerfilUsuarios).DSPerfilUser.FieldByName('IdUser').asInteger;
 
-  TempCampos := Format(' %s as IdUser, %s as Modulo, %s as ObjName, %s as UCKey ', [TableRights.FieldUserID, TableRights.FieldModule, TableRights.FieldComponentName, TableRights.FieldKey]);
-  TempCamposEX := Format('%s, %s as FormName ',[TempCampos, TableRights.FieldFormName]);
+    TempCampos := Format(' %s as IdUser, %s as Modulo, %s as ObjName, %s as UCKey ', [TableRights.FieldUserID, TableRights.FieldModule, TableRights.FieldComponentName, TableRights.FieldKey]);
+    TempCamposEX := Format('%s, %s as FormName ',[TempCampos, TableRights.FieldFormName]);
 
-  UserPermis.DSPermiss := DataConnector.UCGetSQLDataset(Format('Select %s from %s tab Where tab.%s = %s and tab.%s = %s',
-                          [TempCampos, TableRights.TableName, TableRights.FieldUserID ,TCadPerfil(FormPerfilUsuarios).DSPerfilUser.FieldByName('IdUser').asString, TableRights.FieldModule, QuotedStr(ApplicationID)]) );
-  UserPermis.DSPermiss.Open;
+    UserPermis.DSPermiss := DataConnector.UCGetSQLDataset(Format('Select %s from %s tab Where tab.%s = %s and tab.%s = %s',
+                            [TempCampos, TableRights.TableName, TableRights.FieldUserID ,TCadPerfil(FormPerfilUsuarios).DSPerfilUser.FieldByName('IdUser').asString, TableRights.FieldModule, QuotedStr(ApplicationID)]) );
+    UserPermis.DSPermiss.Open;
 
-  UserPermis.DSPermissEX := DataConnector.UCGetSQLDataset(Format('Select %s from %s tab1 Where tab1.%s = %s and tab1.%s = %s',
-                          [TempCamposEX, TableRights.TableName + 'EX', TableRights.FieldUserID, TCadPerfil(FormPerfilUsuarios).DSPerfilUser.FieldByName('IdUser').asString, TableRights.FieldModule, QuotedStr(ApplicationID)]) );
-  UserPermis.DSPermissEX.Open;
+    UserPermis.DSPermissEX := DataConnector.UCGetSQLDataset(Format('Select %s from %s tab1 Where tab1.%s = %s and tab1.%s = %s',
+                            [TempCamposEX, TableRights.TableName + 'EX', TableRights.FieldUserID, TCadPerfil(FormPerfilUsuarios).DSPerfilUser.FieldByName('IdUser').asString, TableRights.FieldModule, QuotedStr(ApplicationID)]) );
+    UserPermis.DSPermissEX.Open;
 
-  UserPermis.DSPerfil := TDataset.Create(nil);
+    try
+      UserPermis.DSPerfil := TDataset.Create(nil);
+      UserPermis.ShowModal;
 
-  UserPermis.ShowModal;
+      TCadPerfil(FormPerfilUsuarios).DSPerfilUser.Close;
+      TCadPerfil(FormPerfilUsuarios).DSPerfilUser.Open;
+      TCadPerfil(FormPerfilUsuarios).DSPerfilUser.Locate('idUser', UserPermis.TempIdUser,[]);
+    finally
+      FreeAndNil(UserPermis);
+    end;
 
-  TCadPerfil(FormPerfilUsuarios).DSPerfilUser.Close;
-  TCadPerfil(FormPerfilUsuarios).DSPerfilUser.Open;
-  TCadPerfil(FormPerfilUsuarios).DSPerfilUser.Locate('idUser', UserPermis.TempIdUser,[]);
-  FreeAndNil(UserPermis);
+  except on E: Exception do
+    begin
+      ShowMessage('Erro ao aplicar permissões: ' + E.Message);
+      EncerrarAplicacao;
+    end;
+  end;
 end;
 
 procedure TUserControl.ShowChangePassword;
 begin
-  ActionTrocaSenha(self);
+  try
+    ActionTrocaSenha(self);
+  except on E: Exception do
+    begin
+      ShowMessage('Erro ao aplicar permissões: ' + E.Message);
+      EncerrarAplicacao;
+    end;
+  end;
 end;
 
 procedure TUserControl.ShowLogManager;
 begin
-  ActionLog(Self);
+  try
+    ActionLog(Self);
+  except on E: Exception do
+    begin
+      ShowMessage('Erro ao aplicar permissões: ' + E.Message);
+      EncerrarAplicacao;
+    end;
+  end;
 end;
 
 procedure TUserControl.ShowProfileManager;
 begin
-  ActionUserProfile(self);
+  try
+    ActionUserProfile(self);
+  except on E: Exception do
+    begin
+      ShowMessage('Erro ao aplicar permissões: ' + E.Message);
+      EncerrarAplicacao;
+    end;
+  end;
 end;
 
 procedure TUserControl.ShowUserManager;
 begin
-  ActionCadUser(self);
+  try
+    ActionCadUser(self);
+  except on E: Exception do
+    begin
+      ShowMessage('Erro ao aplicar permissões: ' + E.Message);
+      EncerrarAplicacao;
+    end;
+  end;
 end;
 
 procedure TUserControl.AddUCControlMonitor(UCControl: TUCControls);
 begin
-  UCControlList.Add(UCControl);
+  try
+    UCControlList.Add(UCControl);
+  except on E: Exception do
+    begin
+      ShowMessage('Erro ao aplicar permissões: ' + E.Message);
+      EncerrarAplicacao;
+    end;
+  end;
 end;
 
 procedure TUserControl.ApplyRightsUCControlMonitor;
 var
   Contador : Integer;
 begin
-  for Contador := 0 to Pred(UCControlList.Count) do
-    TUCControls(UCControlList.Items[Contador]).ApplyRights;
+  try
+    for Contador := 0 to Pred(UCControlList.Count) do
+      TUCControls(UCControlList.Items[Contador]).ApplyRights;
+  except on E: Exception do
+    begin
+      ShowMessage('Erro ao aplicar permissões: ' + E.Message);
+      EncerrarAplicacao;
+    end;
+  end;
 end;
 
 procedure TUserControl.DeleteUCControlMonitor(UCControl: TUCControls);
@@ -1816,34 +2352,66 @@ var
   Contador : Integer;
   SLControls : TStringList;
 begin
-  if not Assigned(UCControlList) then Exit;
-  SLControls := TStringList.Create;
-  for Contador := 0 to Pred(UCControlList.Count) do
-    if TUCControls(UCControlList.Items[Contador]) = UCControl then
-      SLControls.Add(IntToStr(Contador));
+  try
+    if not Assigned(UCControlList) then
+      Exit;
 
-  for Contador := 0 to Pred(SLControls.Count) do
-    UCControlList.Delete(StrToInt(SLControls[Contador]));
+    SLControls := TStringList.Create;
 
+    for Contador := 0 to Pred(UCControlList.Count) do
+      if TUCControls(UCControlList.Items[Contador]) = UCControl then
+        SLControls.Add(IntToStr(Contador));
+
+    for Contador := 0 to Pred(SLControls.Count) do
+      UCControlList.Delete(StrToInt(SLControls[Contador]));
+  except on E: Exception do
+    begin
+      ShowMessage('Erro ao aplicar permissões: ' + E.Message);
+      EncerrarAplicacao;
+    end;
+  end;
 end;
 
 procedure TUserControl.LockControlsUCControlMonitor;
 var
   Contador : Integer;
 begin
-  for Contador := 0 to Pred(UCControlList.Count) do
-   TUCControls(UCControlList.Items[Contador]).LockControls;
+  try
+    for Contador := 0 to Pred(UCControlList.Count) do
+     TUCControls(UCControlList.Items[Contador]).LockControls;
+  except on E: Exception do
+    begin
+      ShowMessage('Erro ao aplicar permissões: ' + E.Message);
+      EncerrarAplicacao;
+    end;
+  end;
 end;
 
 procedure TUserControl.SetUCDataConn(const Value: TUCDataConn);
 begin
-  FUCDataConn := Value;
-  if Assigned(Value) then Value.FreeNotification(Self);
+  try
+    FUCDataConn := Value;
+
+    if Assigned(Value) then
+      Value.FreeNotification(Self);
+  except on E: Exception do
+    begin
+      ShowMessage('Erro ao aplicar permissões: ' + E.Message);
+      EncerrarAplicacao;
+    end;
+  end;
 end;
 
 procedure TUserControl.AddLoginMonitor(UCAppMessage: TUCAppMessage);
 begin
-  LoginMonitorList.Add(UCAppMessage);
+  try
+    LoginMonitorList.Add(UCAppMessage);
+  except on E: Exception do
+    begin
+      ShowMessage('Erro ao aplicar permissões: ' + E.Message);
+      EncerrarAplicacao;
+    end;
+  end;
 end;
 
 procedure TUserControl.DeleteLoginMonitor(UCAppMessage: TUCAppMessage);
@@ -1851,34 +2419,59 @@ var
   Contador : Integer;
   SLControls : TStringList;
 begin
-  SLControls := TStringList.Create;
-  if Assigned(LoginMonitorList) then
-    for Contador := 0 to Pred(LoginMonitorList.Count) do
-      if TUCAppMessage(LoginMonitorList.Items[Contador]) = UCAppMessage then
-        SLControls.Add(IntToStr(Contador));
-  if assigned(SLControls) then
-    for Contador := 0 to Pred(SLControls.Count) do
-      LoginMonitorList.Delete(StrToInt(SLControls[Contador]));
+  try
+    SLControls := TStringList.Create;
+
+    if Assigned(LoginMonitorList) then
+      for Contador := 0 to Pred(LoginMonitorList.Count) do
+        if TUCAppMessage(LoginMonitorList.Items[Contador]) = UCAppMessage then
+          SLControls.Add(IntToStr(Contador));
+
+    if assigned(SLControls) then
+      for Contador := 0 to Pred(SLControls.Count) do
+        LoginMonitorList.Delete(StrToInt(SLControls[Contador]));
+  except on E: Exception do
+    begin
+      ShowMessage('Erro ao aplicar permissões: ' + E.Message);
+      EncerrarAplicacao;
+    end;
+  end;
 end;
 
 procedure TUserControl.NotificationLoginMonitor;
 var
   Contador : Integer;
 begin
-  for Contador := 0 to Pred(LoginMonitorList.Count) do
-    TUCAppMessage(LoginMonitorList.Items[Contador]).CheckMessages;
+  try
+    for Contador := 0 to Pred(LoginMonitorList.Count) do
+      TUCAppMessage(LoginMonitorList.Items[Contador]).CheckMessages;
+  except on E: Exception do
+    begin
+      ShowMessage('Erro ao aplicar permissões: ' + E.Message);
+      EncerrarAplicacao;
+    end;
+  end;
 end;
 
 { TUCAutoLogin }
 
 procedure TUCAutoLogin.Assign(Source: TPersistent);
 begin
-  if Source is TUCAutoLogin then
-  begin
-    Self.Active := TUCAutoLogin(Source).Active;
-    Self.User := TUCAutoLogin(Source).User;
-    Self.Password := TUCAutoLogin(Source).Password;
-  end else inherited;
+  try
+    if Source is TUCAutoLogin then
+    begin
+      Self.Active   := TUCAutoLogin(Source).Active;
+      Self.User     := TUCAutoLogin(Source).User;
+      Self.Password := TUCAutoLogin(Source).Password;
+    end
+    else
+      inherited;
+  except on E: Exception do
+    begin
+      ShowMessage('Erro ao aplicar permissões: ' + E.Message);
+      EncerrarAplicacao;
+    end;
+  end;
 end;
 
 constructor TUCAutoLogin.Create(AOwner: TComponent);
@@ -1895,11 +2488,20 @@ end;
 
 procedure TNaoPermitidos.Assign(Source: TPersistent);
 begin
-  if Source is TNaoPermitidos then
-  begin
-    Self.MenuVisible := TNaoPermitidos(Source).MenuVisible;
-    Self.ActionVisible := TNaoPermitidos(Source).FMenuVisible;
-  end else inherited;
+  try
+    if Source is TNaoPermitidos then
+    begin
+      Self.MenuVisible   := TNaoPermitidos(Source).MenuVisible;
+      Self.ActionVisible := TNaoPermitidos(Source).FMenuVisible;
+    end
+    else
+      inherited;
+  except on E: Exception do
+    begin
+      ShowMessage('Erro ao aplicar permissões: ' + E.Message);
+      EncerrarAplicacao;
+    end;
+  end;
 end;
 
 constructor TNaoPermitidos.Create(AOwner: TComponent);
@@ -1916,13 +2518,22 @@ end;
 
 procedure TLogControl.Assign(Source: TPersistent);
 begin
-  if Source is TLogControl then
-  begin
-    Self.Active := TLogControl(Source).Active;
-    Self.TableLog := TLogControl(Source).TableLog;
-    Self.MenuItem := TLogControl(Source).MenuItem;
-    Self.Action := TLogControl(Source).Action;
-  end else inherited;
+  try
+    if Source is TLogControl then
+    begin
+      Self.Active   := TLogControl(Source).Active;
+      Self.TableLog := TLogControl(Source).TableLog;
+      Self.MenuItem := TLogControl(Source).MenuItem;
+      Self.Action   := TLogControl(Source).Action;
+    end
+    else
+      inherited;
+  except on E: Exception do
+    begin
+      ShowMessage('Erro ao aplicar permissões: ' + E.Message);
+      EncerrarAplicacao;
+    end;
+  end;
 end;
 
 constructor TLogControl.Create(AOwner: TComponent);
@@ -1937,55 +2548,99 @@ end;
 
 procedure TLogControl.SetFActLog(const Value: TAction);
 begin
-  FActLog := Value;
-  if Value <> nil then Value.FreeNotification(Self.Action);
+  try
+    FActLog := Value;
+    if Value <> nil then
+      Value.FreeNotification(Self.Action);
+  except on E: Exception do
+    begin
+      ShowMessage('Erro ao aplicar permissões: ' + E.Message);
+      EncerrarAplicacao;
+    end;
+  end;
 end;
 
 procedure TLogControl.SetFMenuLog(const Value: TMenuItem);
 begin
-  FMenuLog := Value;
-  if Value <> nil then Value.FreeNotification(Self.MenuItem);
-end;
+  try
+    FMenuLog := Value;
 
+    if Value <> nil then
+      Value.FreeNotification(Self.MenuItem);
+  except on E: Exception do
+    begin
+      ShowMessage('Erro ao aplicar permissões: ' + E.Message);
+      EncerrarAplicacao;
+    end;
+  end;
+end;
 
 procedure TUserControl.ShowLogin;
 begin
-  FRetry := 0;
-  if Assigned(onCustomLoginForm) then OnCustomLoginForm(Self, FormLogin);
-  if FormLogin = nil then
-  begin
-    FormLogin := TLoginWindow.Create(self);
-    with FormLogin as TLoginWindow do
+  try
+    LimpaDadosUsuario;
+
+    FRetry := 0;
+
+    if Assigned(onCustomLoginForm) then
+      OnCustomLoginForm(Self, FormLogin);
+
+    if FormLogin = nil then
     begin
-      SetLoginWindow(TLoginWindow(FormLogin));
-      btOK.onClick := ActionOKLogin;
-      onCloseQuery := Testafecha;
-  {$IFDEF VER130}
-  {$ELSE}
-      lbEsqueci.OnClick := ActionEsqueceuSenha;
-  {$ENDIF}
+      FormLogin := TLoginWindow.Create(self);
+      with FormLogin as TLoginWindow do
+      begin
+        SetLoginWindow(TLoginWindow(FormLogin));
+        btOK.onClick := ActionOKLogin;
+        onCloseQuery := Testafecha;
+        {$IFDEF VER130}
+        {$ELSE}
+          lbEsqueci.OnClick := ActionEsqueceuSenha;
+        {$ENDIF}
+      end;
+    end;
+
+    try
+      FormLogin.ShowModal;
+    finally
+      FreeAndNil(FormLogin);
+    end;
+  except on E: Exception do
+    begin
+      ShowMessage('Erro ao aplicar permissões: ' + E.Message);
+      EncerrarAplicacao;
     end;
   end;
-  FormLogin.ShowModal;
-  FreeAndNil(FormLogin);
 end;
 
 procedure TUserControl.ActionOKLogin(Sender: TObject);
 var
   TempUser, TempPassword : String;
 begin
-  TempUser := TLoginWindow(FormLogin).EditUsuario.Text;
-  TempPassword := TLoginWindow(FormLogin).EditSenha.Text;
-  if Assigned(OnLogin) then Onlogin(Self, TempUser, TempPassword);
-  if VerificaLogin(TempUser, TempPassword) then TLoginWindow(FormLogin).Close
-  else
-  begin
-    MessageDlg(Settings.CommonMessages.InvalidLogin, mtWarning, [mbOK], 0);
-    Inc(FRetry);
-    if (Login.MaxLoginAttempts > 0) and ( FRetry = Login.MaxLoginAttempts) then
+  try
+    TempUser     := TLoginWindow(FormLogin).EditUsuario.Text;
+    TempPassword := TLoginWindow(FormLogin).EditSenha.Text;
+
+    if Assigned(OnLogin) then
+      Onlogin(Self, TempUser, TempPassword);
+
+    if VerificaLogin(TempUser, TempPassword) then
+      TLoginWindow(FormLogin).Close
+    else
     begin
-      MessageDlg(Format(Settings.CommonMessages.MaxLoginAttemptsError,[Login.MaxLoginAttempts]), mtError, [mbOK], 0);
-      halt;
+      MessageDlg(Settings.CommonMessages.InvalidLogin, mtWarning, [mbOK], 0);
+      Inc(FRetry);
+      if (Login.MaxLoginAttempts > 0) and ( FRetry = Login.MaxLoginAttempts) then
+      begin
+        MessageDlg(Format(Settings.CommonMessages.MaxLoginAttemptsError,[Login.MaxLoginAttempts]), mtError, [mbOK], 0);
+        EncerrarAplicacao;
+        //halt;
+      end;
+    end;
+  except on E: Exception do
+    begin
+      ShowMessage('Erro ao aplicar permissões: ' + E.Message);
+      EncerrarAplicacao;
     end;
   end;
 end;
@@ -1993,35 +2648,60 @@ end;
 procedure TUserControl.TestaFecha(Sender: TObject;
   var CanClose: Boolean);
 begin
-  CanClose := (CurrentUser.UserID > 0);
+  try
+    CanClose := (CurrentUser.UserID > 0);
+  except on E: Exception do
+    begin
+      ShowMessage('Erro ao aplicar permissões: ' + E.Message);
+      EncerrarAplicacao;
+    end;
+  end;
 end;
-
 
 procedure TUserControl.ApplyRights;
 var
   TempDS : TDataset;
 begin
-  // Aplica Permissoes do Usuario logado
-  TempDS := DataConnector.UCGetSQLDataset('Select '+TableRights.FieldComponentName+' as ObjName, '+
-                        TableRights.FieldKey + ' as UCKey, ' + TableRights.FieldUserID + ' as UserID '+
-                        ' from '+ TableRights.TableName +  ' Where '+TableRights.FieldUserID+' = ' +
-                        IntToStr(CurrentUser.UserID)+ ' And '+TableRights.FieldModule+' = ' + QuotedStr(ApplicationID));
-  ApplyRightsObj(TempDS);
-  TempDS.Close;
+  try
+    try
+      // Aplica Permissoes do Usuario logado
+      TempDS := DataConnector.UCGetSQLDataset('Select '+
+                  TableRights.FieldComponentName+' as ObjName, '+
+                  TableRights.FieldKey + ' as UCKey, ' +
+                  TableRights.FieldUserID + ' as UserID '+
+                  ' from '+ TableRights.TableName +
+                  ' Where '+TableRights.FieldUserID+' = ' + IntToStr(CurrentUser.UserID)+
+                  ' And '+TableRights.FieldModule+' = ' + QuotedStr(ApplicationID));
+      ApplyRightsObj(TempDS);
+      TempDS.Close;
 
+      // Aplica Permissoes do Perfil do usuario
+      if CurrentUser.Profile > 0 then
+      begin
+        TempDS := DataConnector.UCGetSQLDataset('Select '+
+                    TableRights.FieldComponentName+' as ObjName, ' +
+                    TableRights.FieldKey + ' as UCKey, ' +
+                    TableRights.FieldUserID + ' as UserID '+
+                    ' from '  + TableRights.TableName +
+                    ' Where ' + TableRights.FieldUserID+' = ' + IntToStr(CurrentUser.Profile)+
+                    ' And '   + TableRights.FieldModule+' = ' + QuotedStr(ApplicationID));
 
-  // Aplica Permissoes do Perfil do usuario
-  if CurrentUser.Profile > 0 then
-  begin
-    TempDS := DataConnector.UCGetSQLDataset('Select '+TableRights.FieldComponentName+' as ObjName, ' +
-    TableRights.FieldKey + ' as UCKey, ' + TableRights.FieldUserID + ' as UserID '+
-                          ' from '+ TableRights.TableName +  ' Where '+TableRights.FieldUserID+' = ' +
-                          IntToStr(CurrentUser.Profile)+ ' And '+TableRights.FieldModule+' = ' + QuotedStr(ApplicationID));
-    ApplyRightsObj(TempDS, True);
-    TempDS.Close;
+        ApplyRightsObj(TempDS, True);
+        TempDS.Close;
+      end;
+
+    finally
+      FreeAndNil(TempDS);
+      if Assigned(FAfterLogin) then
+        FAfterLogin(Self);
+    end;
+
+  except on E: Exception do
+    begin
+      ShowMessage('Erro ao aplicar permissões: ' + E.Message);
+      EncerrarAplicacao;
+    end;
   end;
-  FreeAndNil(TempDS);
-  if Assigned(FAfterLogin) then FAfterLogin(Self);
 end;
 
 procedure TUserControl.ApplyRightsObj( FDataset : TDataset; FProfile : Boolean = False);
@@ -2032,156 +2712,195 @@ var
   ObjAct : TObject;
   OwnerMenu : TComponent;
 begin
-  //Permissao de Menus   QMD
-  if Assigned(ControlRight.MainMenu) then
-  begin
-    OwnerMenu := ControlRight.MainMenu.Owner;
-    for Contador := 0 to Pred(OwnerMenu.ComponentCount ) do //qmd  -1 removido em 29/11/2004
+  try
+    if Assigned(ControlRight.MainMenu) then
     begin
-      if (OwnerMenu.Components[Contador].ClassType = TMenuItem) and (TMenuItem(OwnerMenu.Components[Contador]).GetParentMenu = ControlRight.MainMenu) then
+      OwnerMenu := ControlRight.MainMenu.Owner;
+      for Contador := 0 to Pred(OwnerMenu.ComponentCount ) do
+      begin
+        if (OwnerMenu.Components[Contador].ClassType = TMenuItem) and (TMenuItem(OwnerMenu.Components[Contador]).GetParentMenu = ControlRight.MainMenu) then
+        begin
+          if not FProfile then
+          begin
+            Encontrado := FDataset.Locate('ObjName', OwnerMenu.Components[Contador].Name,[]);
+            //verifica key
+            if Encontrado then
+            begin
+              Key        := Decrypt(FDataset.FieldByName('UCKey').asString, EncryptKey);
+              Encontrado := (Key = FDataset.FieldByName('UserID').asString + FDataset.FieldByName('ObjName').asString);
+            end;
+            TMenuItem(OwnerMenu.Components[Contador]).Enabled := Encontrado;
+            if not Encontrado then
+              TMenuItem(OwnerMenu.Components[Contador]).Visible := NotAllowedItems.MenuVisible
+            else
+              TMenuItem(OwnerMenu.Components[Contador]).Visible := True;
+          end
+          else
+            begin
+              if FDataset.Locate('ObjName', OwnerMenu.Components[Contador].Name,[]) then
+              begin
+                //verifica key
+                if (Decrypt(FDataset.FieldByName('UCKey').asString, EncryptKey) = FDataset.FieldByName('UserID').asString + FDataset.FieldByName('ObjName').asString) then
+                begin
+                  TMenuItem(OwnerMenu.Components[Contador]).Enabled := True;
+                  TMenuItem(OwnerMenu.Components[Contador]).Visible := True;
+                end;
+              end;
+            end;
+          if Assigned(OnApplyRightsMenuIt) then OnApplyRightsMenuIt(Self, TMenuItem(OwnerMenu.Components[Contador]));
+        end;
+      end;
+    end;
+
+    //Permissao de Actions
+    if (Assigned(ControlRight.ActionList) ) {$IFDEF UCACTMANAGER}or (Assigned(ControlRight.ActionManager)) or (Assigned(ControlRight.ActionMainMenuBar)){$ENDIF} then
+    begin
+      if Assigned(ControlRight.ActionList) then
+        ObjAct := ControlRight.ActionList {$IFDEF UCACTMANAGER}
+      else
+        ObjAct := ControlRight.ActionManager{$ENDIF};
+
+      for contador := 0 to TActionList(ObjAct).ActionCount -1 do
       begin
         if not FProfile then
         begin
-          Encontrado := FDataset.Locate('ObjName', OwnerMenu.Components[Contador].Name,[]);
+          Encontrado := FDataset.Locate('ObjName', TAction(TActionList(ObjAct).Actions[contador]).Name ,[]);
           //verifica key
           if Encontrado then
-          begin
-            Key := Decrypt(FDataset.FieldByName('UCKey').asString, EncryptKey);
-            Encontrado := (Key = FDataset.FieldByName('UserID').asString + FDataset.FieldByName('ObjName').asString);
-          end;
-          TMenuItem(OwnerMenu.Components[Contador]).Enabled := Encontrado;
-          if not Encontrado then TMenuItem(OwnerMenu.Components[Contador]).Visible := NotAllowedItems.MenuVisible
-          else TMenuItem(OwnerMenu.Components[Contador]).Visible := True;
-        end else
+            Encontrado := (Decrypt(FDataset.FieldByName('UCKey').asString, EncryptKey) = FDataset.FieldByName('UserID').asString + FDataset.FieldByName('ObjName').asString);
+
+          TAction(TActionList(ObjAct).Actions[contador]).Enabled := Encontrado;
+
+          if not Encontrado then
+            TAction(TActionList(ObjAct).Actions[contador]).Visible := NotAllowedItems.ActionVisible
+          else
+            TAction(TActionList(ObjAct).Actions[contador]).Visible := True;
+        end
+        else
         begin
-          if FDataset.Locate('ObjName', OwnerMenu.Components[Contador].Name,[]) then
+          if FDataset.Locate('ObjName', TAction(TActionList(ObjAct).Actions[contador]).Name ,[]) then
           begin
             //verifica key
             if (Decrypt(FDataset.FieldByName('UCKey').asString, EncryptKey) = FDataset.FieldByName('UserID').asString + FDataset.FieldByName('ObjName').asString) then
             begin
-              TMenuItem(OwnerMenu.Components[Contador]).Enabled := True;
-              TMenuItem(OwnerMenu.Components[Contador]).Visible := True;
+              TAction(TActionList(ObjAct).Actions[contador]).Enabled := True;
+              TAction(TActionList(ObjAct).Actions[contador]).Visible := True;
             end;
           end;
         end;
-        if Assigned(OnApplyRightsMenuIt) then OnApplyRightsMenuIt(Self, TMenuItem(OwnerMenu.Components[Contador]));
+        if Assigned(OnApplyRightsActionIt) then
+          OnApplyRightsActionIt(Self, TAction(TActionList(ObjAct).Actions[contador]));
       end;
     end;
-  end;
-
-  //Permissao de Actions
-  if (Assigned(ControlRight.ActionList) ) {$IFDEF UCACTMANAGER}or (Assigned(ControlRight.ActionManager)) or (Assigned(ControlRight.ActionMainMenuBar)){$ENDIF} then
-  begin
-    if Assigned(ControlRight.ActionList) then ObjAct := ControlRight.ActionList {$IFDEF UCACTMANAGER}else ObjAct := ControlRight.ActionManager{$ENDIF};
-    for contador := 0 to TActionList(ObjAct).ActionCount -1 do
+    {$IFDEF UCACTMANAGER}
+    if Assigned(ControlRight.ActionMainMenuBar) then
     begin
-      if not FProfile then
+      for Contador := 0 to ControlRight.ActionMainMenuBar.ActionClient.Items.Count-1 do
       begin
-        Encontrado := FDataset.Locate('ObjName', TAction(TActionList(ObjAct).Actions[contador]).Name ,[]);
-        //verifica key
-        if Encontrado then
-          Encontrado := (Decrypt(FDataset.FieldByName('UCKey').asString, EncryptKey) = FDataset.FieldByName('UserID').asString + FDataset.FieldByName('ObjName').asString);
-
-        TAction(TActionList(ObjAct).Actions[contador]).Enabled := Encontrado;
-        if not Encontrado then TAction(TActionList(ObjAct).Actions[contador]).Visible := NotAllowedItems.ActionVisible
-        else TAction(TActionList(ObjAct).Actions[contador]).Visible := True;
-      end else begin
-        if FDataset.Locate('ObjName', TAction(TActionList(ObjAct).Actions[contador]).Name ,[]) then
+        Temp := IntToStr(Contador);
+        if ControlRight.ActionMainMenuBar.ActionClient.Items[StrToInt(Temp)].Items.Count > 0 then
         begin
-          //verifica key
-          if (Decrypt(FDataset.FieldByName('UCKey').asString, EncryptKey) = FDataset.FieldByName('UserID').asString + FDataset.FieldByName('ObjName').asString) then
-          begin
-            TAction(TActionList(ObjAct).Actions[contador]).Enabled := True;
-            TAction(TActionList(ObjAct).Actions[contador]).Visible := True;
-          end;
+          ControlRight.ActionMainMenuBar.ActionClient.Items[StrToInt(Temp)].Visible :=
+            (FDataset.Locate('ObjName',#1+'G'+ControlRight.ActionMainMenuBar.ActionClient.Items[StrToInt(Temp)].Caption,[])) and
+            (Decrypt(FDataset.FieldByName('UCKey').asString, EncryptKey) = FDataset.FieldByName('UserID').asString + FDataset.FieldByName('ObjName').asString);
+          TrataActMenuBarIt(ControlRight.ActionMainMenuBar.ActionClient.Items[StrToInt(Temp)], FDataset);
         end;
       end;
-      if Assigned(OnApplyRightsActionIt) then OnApplyRightsActionIt(Self, TAction(TActionList(ObjAct).Actions[contador]));
     end;
-  end;
-  {$IFDEF UCACTMANAGER}
-  if Assigned(ControlRight.ActionMainMenuBar) then
-  begin
-    for Contador := 0 to ControlRight.ActionMainMenuBar.ActionClient.Items.Count-1 do
+    {$ENDIF}
+  except on E: Exception do
     begin
-      Temp := IntToStr(Contador);
-      if ControlRight.ActionMainMenuBar.ActionClient.Items[StrToInt(Temp)].Items.Count > 0 then
-      begin
-        ControlRight.ActionMainMenuBar.ActionClient.Items[StrToInt(Temp)].Visible :=
-          (FDataset.Locate('ObjName',#1+'G'+ControlRight.ActionMainMenuBar.ActionClient.Items[StrToInt(Temp)].Caption,[])) and
-          (Decrypt(FDataset.FieldByName('UCKey').asString, EncryptKey) = FDataset.FieldByName('UserID').asString + FDataset.FieldByName('ObjName').asString);
-        TrataActMenuBarIt(ControlRight.ActionMainMenuBar.ActionClient.Items[StrToInt(Temp)], FDataset);
-      end;
+      ShowMessage('Erro ao aplicar permissões: ' + E.Message);
+      EncerrarAplicacao;
     end;
   end;
-  {$ENDIF}
 end;
-
 
 procedure TUserControl.UnlockEX( FormObj : TCustomForm; ObjName : String);
 begin
-  if FormObj.FindComponent(ObjName) = nil then Exit;
-  if FormObj.FindComponent(ObjName) is TControl then
-  begin
-    TControl(FormObj.FindComponent(ObjName)).Enabled := True;
-    TControl(FormObj.FindComponent(ObjName)).Visible := True;
-  end;
+  try
+    if FormObj.FindComponent(ObjName) = nil then
+      Exit;
 
-  if FormObj.FindComponent(ObjName) is TMenuItem then // tmenuitem
-  begin
-    TMenuItem(FormObj.FindComponent(ObjName)).Enabled := True;
-    TMenuItem(FormObj.FindComponent(ObjName)).Visible := True;
-    //chama evento OnApplyRightsMenuIt
-    if Assigned(OnApplyRightsMenuIt) then OnApplyRightsMenuIt(self, FormObj.FindComponent(ObjName) as TMenuItem);
-  end;
+    if FormObj.FindComponent(ObjName) is TControl then
+    begin
+      TControl(FormObj.FindComponent(ObjName)).Enabled := True;
+      TControl(FormObj.FindComponent(ObjName)).Visible := True;
+    end;
 
-  if FormObj.FindComponent(ObjName) is TAction then // tmenuitem
-  begin
-    TAction(FormObj.FindComponent(ObjName)).Enabled := True;
-    TAction(FormObj.FindComponent(ObjName)).Visible := True;
-    //chama evento OnApplyRightsMenuIt
-    if Assigned(OnApplyRightsActionIt) then OnApplyRightsActionIt(self, FormObj.FindComponent(ObjName) as TAction);
-  end;
+    if FormObj.FindComponent(ObjName) is TMenuItem then // tmenuitem
+    begin
+      TMenuItem(FormObj.FindComponent(ObjName)).Enabled := True;
+      TMenuItem(FormObj.FindComponent(ObjName)).Visible := True;
+      //chama evento OnApplyRightsMenuIt
+      if Assigned(OnApplyRightsMenuIt) then
+        OnApplyRightsMenuIt(self, FormObj.FindComponent(ObjName) as TMenuItem);
+    end;
 
-  if FormObj.FindComponent(ObjName) is TField then // Tfield
-  begin
-    TField(FormObj.FindComponent(ObjName)).ReadOnly := False;
-    TField(FormObj.FindComponent(ObjName)).Visible := True;
-    TField(FormObj.FindComponent(ObjName)).onGetText := nil;
-  end;
+    if FormObj.FindComponent(ObjName) is TAction then // tmenuitem
+    begin
+      TAction(FormObj.FindComponent(ObjName)).Enabled := True;
+      TAction(FormObj.FindComponent(ObjName)).Visible := True;
+      //chama evento OnApplyRightsMenuIt
+      if Assigned(OnApplyRightsActionIt) then
+        OnApplyRightsActionIt(self, FormObj.FindComponent(ObjName) as TAction);
+    end;
+
+    if FormObj.FindComponent(ObjName) is TField then // Tfield
+    begin
+      TField(FormObj.FindComponent(ObjName)).ReadOnly := False;
+      TField(FormObj.FindComponent(ObjName)).Visible  := True;
+      TField(FormObj.FindComponent(ObjName)).onGetText := nil;
+    end;
+    except on E: Exception do
+      begin
+        ShowMessage('Erro ao aplicar permissões: ' + E.Message);
+        EncerrarAplicacao;
+      end;
+    end;
 end;
-
 
 procedure TUserControl.LockEX( FormObj : TCustomForm; ObjName : String; naInvisible : Boolean);
 begin
-  if FormObj.FindComponent(ObjName) = nil then Exit;
-  if FormObj.FindComponent(ObjName) is TControl then
-  begin
-    TControl(FormObj.FindComponent(ObjName)).Enabled := False;
-    TControl(FormObj.FindComponent(ObjName)).Visible := not naInvisible; //qmd
-  end;
+  try
+    if FormObj.FindComponent(ObjName) = nil then
+      Exit;
 
-  if FormObj.FindComponent(ObjName) is TMenuItem then // tmenuitem
-  begin
-    TMenuItem(FormObj.FindComponent(ObjName)).Enabled := False;
-    TMenuItem(FormObj.FindComponent(ObjName)).Visible := not naInvisible; //qmd
-    //chama evento OnApplyRightsMenuIt
-    if Assigned(OnApplyRightsMenuIt) then OnApplyRightsMenuIt(self, FormObj.FindComponent(ObjName) as TMenuItem);
-  end;
+    if FormObj.FindComponent(ObjName) is TControl then
+    begin
+      TControl(FormObj.FindComponent(ObjName)).Enabled := False;
+      TControl(FormObj.FindComponent(ObjName)).Visible := not naInvisible; //qmd
+    end;
 
-  if FormObj.FindComponent(ObjName) is TAction then // tmenuitem
-  begin
-    TAction(FormObj.FindComponent(ObjName)).Enabled := False;
-    TAction(FormObj.FindComponent(ObjName)).Visible := not naInvisible; //qmd
-    //chama evento OnApplyRightsMenuIt
-    if Assigned(OnApplyRightsActionIt) then OnApplyRightsActionIt(self, FormObj.FindComponent(ObjName) as TAction);
-  end;
+    if FormObj.FindComponent(ObjName) is TMenuItem then // tmenuitem
+    begin
+      TMenuItem(FormObj.FindComponent(ObjName)).Enabled := False;
+      TMenuItem(FormObj.FindComponent(ObjName)).Visible := not naInvisible; //qmd
+      //chama evento OnApplyRightsMenuIt
+      if Assigned(OnApplyRightsMenuIt) then
+        OnApplyRightsMenuIt(self, FormObj.FindComponent(ObjName) as TMenuItem);
+    end;
 
-  if FormObj.FindComponent(ObjName) is TField then // Tfield
-  begin
-    TField(FormObj.FindComponent(ObjName)).ReadOnly := True;
-    TField(FormObj.FindComponent(ObjName)).Visible := not naInvisible; //qmd
-    TField(FormObj.FindComponent(ObjName)).onGetText := HideField;
+    if FormObj.FindComponent(ObjName) is TAction then // tmenuitem
+    begin
+      TAction(FormObj.FindComponent(ObjName)).Enabled := False;
+      TAction(FormObj.FindComponent(ObjName)).Visible := not naInvisible; //qmd
+      //chama evento OnApplyRightsMenuIt
+      if Assigned(OnApplyRightsActionIt) then
+        OnApplyRightsActionIt(self, FormObj.FindComponent(ObjName) as TAction);
+    end;
+
+    if FormObj.FindComponent(ObjName) is TField then // Tfield
+    begin
+      TField(FormObj.FindComponent(ObjName)).ReadOnly  := True;
+      TField(FormObj.FindComponent(ObjName)).Visible   := not naInvisible; //qmd
+      TField(FormObj.FindComponent(ObjName)).onGetText := HideField;
+    end;
+  except on E: Exception do
+    begin
+      ShowMessage('Erro ao aplicar permissões: ' + E.Message);
+      EncerrarAplicacao;
+    end;
   end;
 end;
 
@@ -2190,25 +2909,40 @@ procedure TUserControl.TrataActMenuBarIt(IT : TActionClientItem; FDataset : TDat
 var
   Contador : integer;
 begin
-  for contador := 0 to IT.Items.Count -1 do
-    if IT.Items[Contador].Caption <> '-' then
-      if IT.Items[Contador].Items.Count > 0 then
-      begin
-        IT.Items[Contador].Visible := (FDataset.Locate('ObjName',#1+'G'+IT.Items[Contador].Caption,[]));
-        TrataActMenuBarIt(IT.Items[Contador], FDataset);
-      end;
+  try
+    for contador := 0 to IT.Items.Count -1 do
+      if IT.Items[Contador].Caption <> '-' then
+        if IT.Items[Contador].Items.Count > 0 then
+        begin
+          IT.Items[Contador].Visible := (FDataset.Locate('ObjName',#1+'G'+IT.Items[Contador].Caption,[]));
+          TrataActMenuBarIt(IT.Items[Contador], FDataset);
+        end;
+  except on E: Exception do
+    begin
+      ShowMessage('Erro ao aplicar permissões: ' + E.Message);
+      EncerrarAplicacao;
+    end;
+  end;
 end;
 {$ENDIF}
+
 procedure TUserControl.CriaTableRights(ExtraRights : Boolean = False);
 begin
-  with TableRights do
-  begin
-    if not ExtraRights then
-      DataConnector.UCExecSQL(Format('Create Table %s( %s int, %s varchar(50), %s varchar(50), %s varchar(255) )',
-                [TableName, FieldUserID, FieldModule, FieldComponentName, FieldKey]) )
-    else
-      DataConnector.UCExecSQL(Format('Create Table %sEX( %s int, %s varchar(50), %s varchar(50), %s varchar(50), %s varchar(255) )',
-                [TableName, FieldUserID, FieldModule, FieldComponentName, FieldFormName, FieldKey]) );
+  try
+    with TableRights do
+    begin
+      if not ExtraRights then
+        DataConnector.UCExecSQL(Format('Create Table %s( %s int, %s varchar(50), %s varchar(50), %s varchar(255) )',
+                  [TableName, FieldUserID, FieldModule, FieldComponentName, FieldKey]) )
+      else
+        DataConnector.UCExecSQL(Format('Create Table %sEX( %s int, %s varchar(50), %s varchar(50), %s varchar(50), %s varchar(255) )',
+                  [TableName, FieldUserID, FieldModule, FieldComponentName, FieldFormName, FieldKey]) );
+    end;
+  except on E: Exception do
+    begin
+      ShowMessage('Erro ao aplicar permissões: ' + E.Message);
+      EncerrarAplicacao;
+    end;
   end;
 end;
 
@@ -2216,23 +2950,38 @@ procedure TUserControl.AddRightEX( idUser : Integer; Module, FormName, ObjName :
 var
   Key : String;
 begin
-  Key := Encrypt(IntToStr(idUser) + ObjName, EncryptKey);
-  with TableRights do
-    DataConnector.UCExecSQL(Format('INSERT INTO %sEX( %s, %s, %s, %s, %s) VALUES (%d, %s, %s, %s, %s)',
-                                               [ TableName, FieldUserID, FieldModule, FieldFormName, FieldComponentName, FieldKey,
-                                                 IdUser, QuotedStr(Module), QuotedStr(FormName), QuotedStr(ObjName), QuotedStr(Key)]));
+  try
+    Key := Encrypt(IntToStr(idUser) + ObjName, EncryptKey);
+    with TableRights do
+      DataConnector.UCExecSQL(Format('INSERT INTO %sEX( %s, %s, %s, %s, %s) VALUES (%d, %s, %s, %s, %s)',
+        [ TableName, FieldUserID, FieldModule, FieldFormName, FieldComponentName, FieldKey,
+        IdUser, QuotedStr(Module), QuotedStr(FormName), QuotedStr(ObjName), QuotedStr(Key)]));
+  except on E: Exception do
+    begin
+      ShowMessage('Erro ao aplicar permissões: ' + E.Message);
+      EncerrarAplicacao;
+    end;
+  end;
 end;
 
 procedure TUserControl.AddRight(idUser : Integer; ItemRight : String);
 var
   Key : String;
 begin
-  if ItemRight = '' then Exit;
+  try
+    if ItemRight = '' then
+      Exit;
 
-  Key := Encrypt(IntToStr(idUser) + ItemRight, EncryptKey);
-  DataConnector.UCExecSQL(Format('Insert into %s( %s, %s, %s, %s) Values( %d, %s, %s, %s)',
-              [TableRights.TableName, TableRights.FieldUserID, TableRights.FieldModule, TableRights.FieldComponentName, TableRights.FieldKey,
-               idUser, QuotedStr(ApplicationID), QuotedStr(ItemRight), QuotedStr(Key)]));
+    Key := Encrypt(IntToStr(idUser) + ItemRight, EncryptKey);
+    DataConnector.UCExecSQL(Format('Insert into %s( %s, %s, %s, %s) Values( %d, %s, %s, %s)',
+      [TableRights.TableName, TableRights.FieldUserID, TableRights.FieldModule, TableRights.FieldComponentName, TableRights.FieldKey,
+      idUser, QuotedStr(ApplicationID), QuotedStr(ItemRight), QuotedStr(Key)]));
+  except on E: Exception do
+    begin
+      ShowMessage('Erro ao aplicar permissões: ' + E.Message);
+      EncerrarAplicacao;
+    end;
+  end;
 end;
 
 
@@ -2240,29 +2989,46 @@ procedure TUserControl.AddRight(idUser : Integer; ItemRight : TObject; FullPath 
 var
   Obj : TObject;
 begin
-  if ItemRight = nil then Exit;
-  Obj := ItemRight;
+  try
+    if ItemRight = nil then
+      Exit;
+    Obj := ItemRight;
 
-  if Obj.ClassType = TMenuItem then
-  begin
-    While Assigned(Obj) and (Obj.ClassType = TMenuItem) and (TComponent(Obj).Name <> '') do
+    if Obj.ClassType = TMenuItem then
     begin
+      While Assigned(Obj) and (Obj.ClassType = TMenuItem) and (TComponent(Obj).Name <> '') do
+      begin
+        AddRight(idUser, TComponent(Obj).Name);
+        if FullPath then
+          Obj := TMenuItem(Obj).Parent
+        else
+          Obj := nil;
+      end;
+    end
+    else
       AddRight(idUser, TComponent(Obj).Name);
-      if FullPath then Obj := TMenuItem(Obj).Parent
-      else Obj := nil;
+  except on E: Exception do
+    begin
+      ShowMessage('Erro ao aplicar permissões: ' + E.Message);
+      EncerrarAplicacao;
     end;
-  end
-  else
-    AddRight(idUser, TComponent(Obj).Name);
+  end;
 end;
 
 procedure TUserControl.CriaTableLog;
 begin
-  DataConnector.UCExecSQL('Create Table '+ LogControl.TableLog + ' ( '+
-                         'IdUser int ,'+
-                         'MSG varchar(250), '+
-                         'Data varchar(14), '+
-                         'Nivel Int)');
+  try
+    DataConnector.UCExecSQL('Create Table '+ LogControl.TableLog + ' ( '+
+                            'IdUser int ,'+
+                            'MSG varchar(250), '+
+                            'Data varchar(14), '+
+                            'Nivel Int)');
+  except on E: Exception do
+    begin
+      ShowMessage('Erro ao aplicar permissões: ' + E.Message);
+      EncerrarAplicacao;
+    end;
+  end;
 end;
 
 {$IFDEF UCACTMANAGER}
@@ -2270,13 +3036,21 @@ procedure TUserControl.IncPermissActMenuBar( idUser : Integer; Act : TAction);
 var
   Temp : TActionClientItem;
 begin
-  if Act = nil then exit;
+  try
+    if Act = nil then
+      exit;
 
-  Temp := ControlRight.ActionMainMenuBar.ActionManager.FindItemByAction(Act);
-  while Temp <> nil do
-  begin
-    AddRight(idUser, #1+'G'+Temp.Caption);
-    Temp := TActionClientItem(TActionClientItem(Temp).ParentItem);
+    Temp := ControlRight.ActionMainMenuBar.ActionManager.FindItemByAction(Act);
+    while Temp <> nil do
+    begin
+      AddRight(idUser, #1+'G'+Temp.Caption);
+      Temp := TActionClientItem(TActionClientItem(Temp).ParentItem);
+    end;
+  except on E: Exception do
+    begin
+      ShowMessage('Erro ao aplicar permissões: ' + E.Message);
+      EncerrarAplicacao;
+    end;
   end;
 end;
 {$ENDIF}
@@ -2288,174 +3062,224 @@ var
   FMsg : TStrings;
   DSUser, DSPerm : TDataSet;
 begin
-  if not TableExists then
-    with TableUsers do
-      DataConnector.UCExecSQL(Format('Create Table %s( %s int, %s varchar(30), %s varchar(30), %s varchar(30), %s varchar(150), %s int, %s char(1), %s int, %s varchar(255) )',
-              [TableName, FieldUserID, FieldUserName, FieldLogin, FieldPassword, FieldEmail, FieldPrivileged, FieldTypeRec, FieldProfile, FieldKey]) );
+  try
+    if not TableExists then
+      with TableUsers do
+        DataConnector.UCExecSQL(Format('Create Table %s( %s int, %s varchar(30), %s varchar(30), %s varchar(30), %s varchar(150), %s int, %s char(1), %s int, %s varchar(255) )',
+                [TableName, FieldUserID, FieldUserName, FieldLogin, FieldPassword, FieldEmail, FieldPrivileged, FieldTypeRec, FieldProfile, FieldKey]) );
 
-  DSUser := DataConnector.UCGetSQLDataset('Select '+TableUsers.FieldUserID+' as idUser from '+ TableUsers.TableName +
-            ' where '+TableUsers.FieldLogin+' = '+ QuotedStr(Login.InitialLogin.User));
-  if DSUser.IsEmpty then
-    FIDUser := AddUser(Login.InitialLogin.User,Login.InitialLogin.Password, Login.InitialLogin.User, Login.InitialLogin.Email, 0, True)
-  else FIDUser := DSUser.FieldByName('idUser').asInteger;
-  DSUser.Close;
-  FreeAndNil(DSUser);
-  DSPerm := DataConnector.UCGetSQLDataset('Select '+TableRights.FieldUserID+' as iduser from '+
-    TableRights.TableName + ' where '+TableRights.FieldUserID+' = '+ IntToStr(FIDUser)+ ' and '+TableRights.FieldModule+' = '+QuotedStr(ApplicationID));
-  if not DSPerm.IsEmpty  then
-  begin
-      DSPerm.Close;
-      FreeAndNil(DSPerm);
-      Exit; //login!
-  end;
-  DSPerm.Close;
-  FreeAndNil(DSPerm);
+    DSUser := DataConnector.UCGetSQLDataset('Select '+
+                TableUsers.FieldUserID+' as idUser '+
+                ' from '+ TableUsers.TableName +
+                ' where '+TableUsers.FieldLogin+' = '+ QuotedStr(Login.InitialLogin.User));
 
-  AddRight(FIDUser, UsersForm.MenuItem);
-  AddRight(FIDUser, UsersForm.Action);
-  AddRight(FIDUser, UsersProfile.MenuItem);
-  AddRight(FIDUser, UsersProfile.Action);
+    if DSUser.IsEmpty then
+      FIDUser := AddUser(Login.InitialLogin.User,Login.InitialLogin.Password, Login.InitialLogin.User, Login.InitialLogin.Email, 0, True)
+    else
+      FIDUser := DSUser.FieldByName('idUser').asInteger;
 
-  AddRight(FIDUser, ChangePasswordForm.MenuItem);
-  AddRight(FIDUser, ChangePasswordForm.Action);
+    DSUser.Close;
+    FreeAndNil(DSUser);
 
-  {$IFDEF UCACTMANAGER}
-  if Assigned(ControlRight.ActionMainMenuBar) then IncPermissActMenuBar(FIDUser, UsersForm.Action);
-  if Assigned(ControlRight.ActionMainMenuBar) then IncPermissActMenuBar(FIDUser, UsersProfile.Action);
-  if Assigned(ControlRight.ActionMainMenuBar) then IncPermissActMenuBar(FIDUser, ChangePasswordForm.Action);
-  {$ENDIF}
-  if LogControl.Active then
-  begin
-    AddRight(FIDUser, LogControl.MenuItem);
-    AddRight(FIDUser, LogControl.Action);
-    {$IFDEF UCACTMANAGER}
-    if Assigned(ControlRight.ActionMainMenuBar) then IncPermissActMenuBar(FIDUser, LogControl.Action);
-    {$ENDIF}
-  end;
+    DSPerm := DataConnector.UCGetSQLDataset('Select '+
+                TableRights.FieldUserID+' as iduser '+
+                ' from '+ TableRights.TableName +
+                ' where '+TableRights.FieldUserID+' = '+ IntToStr(FIDUser)+
+                ' and '+TableRights.FieldModule+' = '+QuotedStr(ApplicationID));
 
-  for contador := 0 to Pred(Login.InitialLogin.InitialRights.Count) do
-    if Owner.FindComponent(Login.InitialLogin.InitialRights[contador]) <> nil then
+    if not DSPerm.IsEmpty  then
     begin
-      AddRight( FIDUser, Owner.FindComponent(Login.InitialLogin.InitialRights[contador]));
-      AddRightEX( FIDUser, ApplicationID, TcustomForm(Owner).name, Login.InitialLogin.InitialRights[contador]);
+        DSPerm.Close;
+        FreeAndNil(DSPerm);
+        Exit; //login!
     end;
 
-  FMsg := TStringList.Create;
-  FMsg.Assign(Settings.CommonMessages.InitialMessage);
-  FMsg.Text := StringReplace(FMsg.Text,':user', Login.InitialLogin.User,[rfReplaceAll]);
-  FMsg.Text := StringReplace(FMsg.Text,':password', Login.InitialLogin.Password, [rfReplaceAll]);
+    DSPerm.Close;
+    FreeAndNil(DSPerm);
 
-  if Assigned(OnCustomInitialMsg) then OnCustomInitialMsg(Self,FCustomForm ,FMsg);
-  if FCustomForm <> nil then FCustomForm.ShowModal else MessageDlg(FMsg.Text, mtInformation, [mbOK], 0);
+    AddRight(FIDUser, UsersForm.MenuItem);
+    AddRight(FIDUser, UsersForm.Action);
+    AddRight(FIDUser, UsersProfile.MenuItem);
+    AddRight(FIDUser, UsersProfile.Action);
+
+    AddRight(FIDUser, ChangePasswordForm.MenuItem);
+    AddRight(FIDUser, ChangePasswordForm.Action);
+
+    {$IFDEF UCACTMANAGER}
+    if Assigned(ControlRight.ActionMainMenuBar) then
+      IncPermissActMenuBar(FIDUser, UsersForm.Action);
+
+    if Assigned(ControlRight.ActionMainMenuBar) then
+      IncPermissActMenuBar(FIDUser, UsersProfile.Action);
+
+    if Assigned(ControlRight.ActionMainMenuBar) then
+      IncPermissActMenuBar(FIDUser, ChangePasswordForm.Action);
+    {$ENDIF}
+
+    if LogControl.Active then
+    begin
+      AddRight(FIDUser, LogControl.MenuItem);
+      AddRight(FIDUser, LogControl.Action);
+      {$IFDEF UCACTMANAGER}
+        if Assigned(ControlRight.ActionMainMenuBar) then
+          IncPermissActMenuBar(FIDUser, LogControl.Action);
+      {$ENDIF}
+    end;
+
+    for contador := 0 to Pred(Login.InitialLogin.InitialRights.Count) do
+      if Owner.FindComponent(Login.InitialLogin.InitialRights[contador]) <> nil then
+      begin
+        AddRight( FIDUser, Owner.FindComponent(Login.InitialLogin.InitialRights[contador]));
+        AddRightEX( FIDUser, ApplicationID, TcustomForm(Owner).name, Login.InitialLogin.InitialRights[contador]);
+      end;
+
+    FMsg := TStringList.Create;
+    FMsg.Assign(Settings.CommonMessages.InitialMessage);
+    FMsg.Text := StringReplace(FMsg.Text,':user', Login.InitialLogin.User,[rfReplaceAll]);
+    FMsg.Text := StringReplace(FMsg.Text,':password', Login.InitialLogin.Password, [rfReplaceAll]);
+
+    if Assigned(OnCustomInitialMsg) then
+      OnCustomInitialMsg(Self,FCustomForm ,FMsg);
+
+    if FCustomForm <> nil then
+      FCustomForm.ShowModal
+    else
+      MessageDlg(FMsg.Text, mtInformation, [mbOK], 0);
+
+  except on E: Exception do
+    begin
+      ShowMessage('Erro ao aplicar permissões: ' + E.Message);
+      EncerrarAplicacao;
+    end;
+  end;
 end;
 
 
 procedure TUserControl.ApplySettings(SourceSettings: TUCSettings);
 begin
+  try
     with Settings.CommonMessages do
     begin
-      BlankPassword := SourceSettings.CommonMessages.BlankPassword;
-      PasswordChanged := SourceSettings.CommonMessages.PasswordChanged;
-      InitialMessage.Text := SourceSettings.CommonMessages.InitialMessage.Text;
+      BlankPassword         := SourceSettings.CommonMessages.BlankPassword;
+      PasswordChanged       := SourceSettings.CommonMessages.PasswordChanged;
+      InitialMessage.Text   := SourceSettings.CommonMessages.InitialMessage.Text;
       MaxLoginAttemptsError := SourceSettings.CommonMessages.MaxLoginAttemptsError;
-      InvalidLogin := SourceSettings.CommonMessages.InvalidLogin;
-      AutoLogonError := SourceSettings.CommonMessages.AutoLogonError;
+      InvalidLogin          := SourceSettings.CommonMessages.InvalidLogin;
+      AutoLogonError        := SourceSettings.CommonMessages.AutoLogonError;
     end;
+
     with Settings.Login do
     begin
-      BtCancel := SourceSettings.Login.BtCancel;
-      BtOK := SourceSettings.Login.BtOK;
+      BtCancel      := SourceSettings.Login.BtCancel;
+      BtOK          := SourceSettings.Login.BtOK;
       LabelPassword := SourceSettings.Login.LabelPassword;
-      LabelUser := SourceSettings.Login.LabelUser;
+      LabelUser     := SourceSettings.Login.LabelUser;
       WindowCaption := SourceSettings.Login.WindowCaption;
-      if Assigned(SourceSettings.Login.LeftImage.Bitmap) then LeftImage.Bitmap := SourceSettings.Login.LeftImage.Bitmap
-      else LeftImage.Bitmap := nil;
-      if Assigned(SourceSettings.Login.TopImage.Bitmap) then TopImage.Bitmap := SourceSettings.Login.TopImage.Bitmap
-      else TopImage.Bitmap := nil;
-      if Assigned(SourceSettings.Login.BottomImage.Bitmap) then BottomImage.Bitmap := SourceSettings.Login.BottomImage.Bitmap
-      else BottomImage.Bitmap := nil;
+
+      if Assigned(SourceSettings.Login.LeftImage.Bitmap) then
+        LeftImage.Bitmap := SourceSettings.Login.LeftImage.Bitmap
+      else
+        LeftImage.Bitmap := nil;
+
+      if Assigned(SourceSettings.Login.TopImage.Bitmap) then
+        TopImage.Bitmap := SourceSettings.Login.TopImage.Bitmap
+      else
+        TopImage.Bitmap := nil;
+
+      if Assigned(SourceSettings.Login.BottomImage.Bitmap) then
+        BottomImage.Bitmap := SourceSettings.Login.BottomImage.Bitmap
+      else
+        BottomImage.Bitmap := nil;
     end;
+
     with Settings.UsersForm do
     begin
-      WindowCaption := SourceSettings.UsersForm.WindowCaption;
-      LabelDescription := SourceSettings.UsersForm.LabelDescription;
-      ColName := SourceSettings.UsersForm.ColName;
-      ColLogin := SourceSettings.UsersForm.ColLogin;
-      ColEmail := SourceSettings.UsersForm.ColEmail;
-      BtAdd := SourceSettings.UsersForm.BtAdd;
-      BtChange := SourceSettings.UsersForm.BtChange;
-      BtDelete := SourceSettings.UsersForm.BtDelete;
-      BtRights := SourceSettings.UsersForm.BtRights;
-      BtPassword := SourceSettings.UsersForm.BtPassword;
-      BtClose := SourceSettings.UsersForm.BtClose;
-      PromptDelete := SourceSettings.UsersForm.PromptDelete;
+      WindowCaption              := SourceSettings.UsersForm.WindowCaption;
+      LabelDescription           := SourceSettings.UsersForm.LabelDescription;
+      ColName                    := SourceSettings.UsersForm.ColName;
+      ColLogin                   := SourceSettings.UsersForm.ColLogin;
+      ColEmail                   := SourceSettings.UsersForm.ColEmail;
+      BtAdd                      := SourceSettings.UsersForm.BtAdd;
+      BtChange                   := SourceSettings.UsersForm.BtChange;
+      BtDelete                   := SourceSettings.UsersForm.BtDelete;
+      BtRights                   := SourceSettings.UsersForm.BtRights;
+      BtPassword                 := SourceSettings.UsersForm.BtPassword;
+      BtClose                    := SourceSettings.UsersForm.BtClose;
+      PromptDelete               := SourceSettings.UsersForm.PromptDelete;
       PromptDelete_WindowCaption := SourceSettings.UsersForm.PromptDelete_WindowCaption; //added by fduenas
     end;
+
     with Settings.UsersProfile do
     begin
-      WindowCaption :=   SourceSettings.UsersProfile.WindowCaption;
-      LabelDescription := SourceSettings.UsersProfile.LabelDescription;
-      ColProfile := SourceSettings.UsersProfile.ColProfile;
-      BtAdd := SourceSettings.UsersProfile.BtAdd;
-      BtChange := SourceSettings.UsersProfile.BtChange;
-      BtDelete := SourceSettings.UsersProfile.BtDelete;
-      BtRights := SourceSettings.UsersProfile.BtRights; //added by fduenas
-      BtClose := SourceSettings.UsersProfile.BtClose;
-      PromptDelete := SourceSettings.UsersProfile.PromptDelete;
+      WindowCaption              :=   SourceSettings.UsersProfile.WindowCaption;
+      LabelDescription           := SourceSettings.UsersProfile.LabelDescription;
+      ColProfile                 := SourceSettings.UsersProfile.ColProfile;
+      BtAdd                      := SourceSettings.UsersProfile.BtAdd;
+      BtChange                   := SourceSettings.UsersProfile.BtChange;
+      BtDelete                   := SourceSettings.UsersProfile.BtDelete;
+      BtRights                   := SourceSettings.UsersProfile.BtRights; //added by fduenas
+      BtClose                    := SourceSettings.UsersProfile.BtClose;
+      PromptDelete               := SourceSettings.UsersProfile.PromptDelete;
       PromptDelete_WindowCaption := SourceSettings.UsersProfile.PromptDelete_WindowCaption; //added by fduenas
     end;
+
     with Settings.AddChangeUser do
     begin
-      WindowCaption := SourceSettings.AddChangeUser.WindowCaption;
-      LabelAdd := SourceSettings.AddChangeUser.LabelAdd;
-      LabelChange := SourceSettings.AddChangeUser.LabelChange;
-      LabelName := SourceSettings.AddChangeUser.LabelName;
-      LabelLogin := SourceSettings.AddChangeUser.LabelLogin;
-      LabelEmail := SourceSettings.AddChangeUser.LabelEmail;
+      WindowCaption   := SourceSettings.AddChangeUser.WindowCaption;
+      LabelAdd        := SourceSettings.AddChangeUser.LabelAdd;
+      LabelChange     := SourceSettings.AddChangeUser.LabelChange;
+      LabelName       := SourceSettings.AddChangeUser.LabelName;
+      LabelLogin      := SourceSettings.AddChangeUser.LabelLogin;
+      LabelEmail      := SourceSettings.AddChangeUser.LabelEmail;
       CheckPrivileged := SourceSettings.AddChangeUser.CheckPrivileged;
-      BtSave := SourceSettings.AddChangeUser.BtSave;
-      BtCancel := SourceSettings.AddChangeUser.BtCancel;
+      BtSave          := SourceSettings.AddChangeUser.BtSave;
+      BtCancel        := SourceSettings.AddChangeUser.BtCancel;
     end;
+
     with Settings.AddChangeProfile do
     begin
       WindowCaption := SourceSettings.AddChangeProfile.WindowCaption;
-      LabelAdd := SourceSettings.AddChangeProfile.LabelAdd;
-      LabelChange := SourceSettings.AddChangeProfile.LabelChange;
-      LabelName := SourceSettings.AddChangeProfile.LabelName;
-      BtSave := SourceSettings.AddChangeProfile.BtSave;
-      BtCancel := SourceSettings.AddChangeProfile.BtCancel;
+      LabelAdd      := SourceSettings.AddChangeProfile.LabelAdd;
+      LabelChange   := SourceSettings.AddChangeProfile.LabelChange;
+      LabelName     := SourceSettings.AddChangeProfile.LabelName;
+      BtSave        := SourceSettings.AddChangeProfile.BtSave;
+      BtCancel      := SourceSettings.AddChangeProfile.BtCancel;
     end;
+
     with Settings.Rights do
     begin
       WindowCaption := SourceSettings.Rights.WindowCaption;
-      LabelUser := SourceSettings.Rights.LabelUser;
-      LabelProfile := SourceSettings.Rights.LabelProfile;
-      PageMenu := SourceSettings.Rights.PageMenu;
-      PageActions := SourceSettings.Rights.PageActions;
-      BtUnlock := SourceSettings.Rights.BtUnlock;
-      BtLock := SourceSettings.Rights.BtLock;
-      BtSave := SourceSettings.Rights.BtSave;
-      BtCancel := SourceSettings.Rights.BtCancel;
+      LabelUser     := SourceSettings.Rights.LabelUser;
+      LabelProfile  := SourceSettings.Rights.LabelProfile;
+      PageMenu      := SourceSettings.Rights.PageMenu;
+      PageActions   := SourceSettings.Rights.PageActions;
+      BtUnlock      := SourceSettings.Rights.BtUnlock;
+      BtLock        := SourceSettings.Rights.BtLock;
+      BtSave        := SourceSettings.Rights.BtSave;
+      BtCancel      := SourceSettings.Rights.BtCancel;
     end;
+
     with Settings.ChangePassword do
     begin
-      WindowCaption := SourceSettings.ChangePassword.WindowCaption;
-      LabelDescription := SourceSettings.ChangePassword.LabelDescription;
+      WindowCaption        := SourceSettings.ChangePassword.WindowCaption;
+      LabelDescription     := SourceSettings.ChangePassword.LabelDescription;
       LabelCurrentPassword := SourceSettings.ChangePassword.LabelCurrentPassword;
-      LabelNewPassword := SourceSettings.ChangePassword.LabelNewPassword;
-      LabelConfirm := SourceSettings.ChangePassword.LabelConfirm;
-      BtSave := SourceSettings.ChangePassword.BtSave;
-      BtCancel := SourceSettings.ChangePassword.BtCancel;
+      LabelNewPassword     := SourceSettings.ChangePassword.LabelNewPassword;
+      LabelConfirm         := SourceSettings.ChangePassword.LabelConfirm;
+      BtSave               := SourceSettings.ChangePassword.BtSave;
+      BtCancel             := SourceSettings.ChangePassword.BtCancel;
     end;
+
     with Settings.CommonMessages.ChangePasswordError do
     begin
       InvalidCurrentPassword := SourceSettings.CommonMessages.ChangePasswordError.InvalidCurrentPassword;
-      NewPasswordError := SourceSettings.CommonMessages.ChangePasswordError.NewPasswordError;
-      NewEqualCurrent := SourceSettings.CommonMessages.ChangePasswordError.NewEqualCurrent;
-      PasswordRequired := SourceSettings.CommonMessages.ChangePasswordError.PasswordRequired;
-      MinPasswordLength := SourceSettings.CommonMessages.ChangePasswordError.MinPasswordLength;
-      InvalidNewPassword := SourceSettings.CommonMessages.ChangePasswordError.InvalidNewPassword;
+      NewPasswordError       := SourceSettings.CommonMessages.ChangePasswordError.NewPasswordError;
+      NewEqualCurrent        := SourceSettings.CommonMessages.ChangePasswordError.NewEqualCurrent;
+      PasswordRequired       := SourceSettings.CommonMessages.ChangePasswordError.PasswordRequired;
+      MinPasswordLength      := SourceSettings.CommonMessages.ChangePasswordError.MinPasswordLength;
+      InvalidNewPassword     := SourceSettings.CommonMessages.ChangePasswordError.InvalidNewPassword;
     end;
+
     with Settings.ResetPassword do
     begin
       WindowCaption := SourceSettings.ResetPassword.WindowCaption;
@@ -2464,78 +3288,90 @@ begin
 
     with Settings.Log do
     begin
-      WindowCaption := SourceSettings.Log.WindowCaption;
-      LabelDescription := SourceSettings.Log.LabelDescription;
-      LabelUser := SourceSettings.Log.LabelUser;
-      LabelDate := SourceSettings.Log.LabelDate;
-      LabelLevel := SourceSettings.Log.LabelLevel;
-      ColLevel := SourceSettings.Log.ColLevel;
-      ColMessage := SourceSettings.Log.ColMessage;
-      ColUser := SourceSettings.Log.ColUser;
-      ColDate := SourceSettings.Log.ColDate;
-      BtFilter := SourceSettings.Log.BtFilter;
-      BtDelete := SourceSettings.Log.BtDelete;
-      BtClose := SourceSettings.Log.BtClose;
-      PromptDelete := SourceSettings.Log.PromptDelete;
+      WindowCaption              := SourceSettings.Log.WindowCaption;
+      LabelDescription           := SourceSettings.Log.LabelDescription;
+      LabelUser                  := SourceSettings.Log.LabelUser;
+      LabelDate                  := SourceSettings.Log.LabelDate;
+      LabelLevel                 := SourceSettings.Log.LabelLevel;
+      ColLevel                   := SourceSettings.Log.ColLevel;
+      ColMessage                 := SourceSettings.Log.ColMessage;
+      ColUser                    := SourceSettings.Log.ColUser;
+      ColDate                    := SourceSettings.Log.ColDate;
+      BtFilter                   := SourceSettings.Log.BtFilter;
+      BtDelete                   := SourceSettings.Log.BtDelete;
+      BtClose                    := SourceSettings.Log.BtClose;
+      PromptDelete               := SourceSettings.Log.PromptDelete;
       PromptDelete_WindowCaption := SourceSettings.Log.PromptDelete_WindowCaption; //added by fduenas
-      OptionUserAll := SourceSettings.Log.OptionUserAll; //added by fduenas
-      OptionLevelLow := SourceSettings.Log.OptionLevelLow; //added by fduenas
-      OptionLevelNormal := SourceSettings.Log.OptionLevelNormal; //added by fduenas
-      OptionLevelHigh := SourceSettings.Log.OptionLevelHigh; //added by fduenas
-      OptionLevelCritic := SourceSettings.Log.OptionLevelCritic; //added by fduenas
-      DeletePerformed := SourceSettings.Log.DeletePerformed; //added by fduenas
+      OptionUserAll              := SourceSettings.Log.OptionUserAll; //added by fduenas
+      OptionLevelLow             := SourceSettings.Log.OptionLevelLow; //added by fduenas
+      OptionLevelNormal          := SourceSettings.Log.OptionLevelNormal; //added by fduenas
+      OptionLevelHigh            := SourceSettings.Log.OptionLevelHigh; //added by fduenas
+      OptionLevelCritic          := SourceSettings.Log.OptionLevelCritic; //added by fduenas
+      DeletePerformed            := SourceSettings.Log.DeletePerformed; //added by fduenas
     end;
 
     with Settings.AppMessages do
     begin
-      MsgsForm_BtNew := SourceSettings.AppMessages.MsgsForm_BtNew;
-      MsgsForm_BtReplay := SourceSettings.AppMessages.MsgsForm_BtReplay;
-      MsgsForm_BtForward := SourceSettings.AppMessages.MsgsForm_BtForward;
-      MsgsForm_BtDelete := SourceSettings.AppMessages.MsgsForm_BtDelete;
-      MsgsForm_BtClose := SourceSettings.AppMessages.MsgsForm_BtClose; //added by fduenas
-      MsgsForm_WindowCaption := SourceSettings.AppMessages.MsgsForm_WindowCaption;
-      MsgsForm_ColFrom := SourceSettings.AppMessages.MsgsForm_ColFrom;
-      MsgsForm_ColSubject := SourceSettings.AppMessages.MsgsForm_ColSubject;
-      MsgsForm_ColDate := SourceSettings.AppMessages.MsgsForm_ColDate;
-      MsgsForm_PromptDelete := SourceSettings.AppMessages.MsgsForm_PromptDelete;
-      MsgsForm_PromptDelete_WindowCaption := SourceSettings.AppMessages.MsgsForm_PromptDelete_WindowCaption; //added by fduenas
-      MsgsForm_NoMessagesSelected := SourceSettings.AppMessages.MsgsForm_NoMessagesSelected; //added by fduenas
+      MsgsForm_BtNew                            := SourceSettings.AppMessages.MsgsForm_BtNew;
+      MsgsForm_BtReplay                         := SourceSettings.AppMessages.MsgsForm_BtReplay;
+      MsgsForm_BtForward                        := SourceSettings.AppMessages.MsgsForm_BtForward;
+      MsgsForm_BtDelete                         := SourceSettings.AppMessages.MsgsForm_BtDelete;
+      MsgsForm_BtClose                          := SourceSettings.AppMessages.MsgsForm_BtClose; //added by fduenas
+      MsgsForm_WindowCaption                    := SourceSettings.AppMessages.MsgsForm_WindowCaption;
+      MsgsForm_ColFrom                          := SourceSettings.AppMessages.MsgsForm_ColFrom;
+      MsgsForm_ColSubject                       := SourceSettings.AppMessages.MsgsForm_ColSubject;
+      MsgsForm_ColDate                          := SourceSettings.AppMessages.MsgsForm_ColDate;
+      MsgsForm_PromptDelete                     := SourceSettings.AppMessages.MsgsForm_PromptDelete;
+      MsgsForm_PromptDelete_WindowCaption       := SourceSettings.AppMessages.MsgsForm_PromptDelete_WindowCaption; //added by fduenas
+      MsgsForm_NoMessagesSelected               := SourceSettings.AppMessages.MsgsForm_NoMessagesSelected; //added by fduenas
       MsgsForm_NoMessagesSelected_WindowCaption := SourceSettings.AppMessages.MsgsForm_NoMessagesSelected_WindowCaption; //added by fduenas
 
-      MsgRec_BtClose := SourceSettings.AppMessages.MsgRec_BtClose;
-      MsgRec_WindowCaption := SourceSettings.AppMessages.MsgRec_WindowCaption;
-      MsgRec_Title := SourceSettings.AppMessages.MsgRec_Title;
-      MsgRec_LabelFrom := SourceSettings.AppMessages.MsgRec_LabelFrom;
-      MsgRec_LabelDate := SourceSettings.AppMessages.MsgRec_LabelDate;
-      MsgRec_LabelSubject := SourceSettings.AppMessages.MsgRec_LabelSubject;
-      MsgRec_LabelMessage := SourceSettings.AppMessages.MsgRec_LabelMessage;
+      MsgRec_BtClose                            := SourceSettings.AppMessages.MsgRec_BtClose;
+      MsgRec_WindowCaption                      := SourceSettings.AppMessages.MsgRec_WindowCaption;
+      MsgRec_Title                              := SourceSettings.AppMessages.MsgRec_Title;
+      MsgRec_LabelFrom                          := SourceSettings.AppMessages.MsgRec_LabelFrom;
+      MsgRec_LabelDate                          := SourceSettings.AppMessages.MsgRec_LabelDate;
+      MsgRec_LabelSubject                       := SourceSettings.AppMessages.MsgRec_LabelSubject;
+      MsgRec_LabelMessage                       := SourceSettings.AppMessages.MsgRec_LabelMessage;
 
-      MsgSend_BtSend := SourceSettings.AppMessages.MsgSend_BtSend;
-      MsgSend_BtCancel := SourceSettings.AppMessages.MsgSend_BtCancel;
-      MsgSend_WindowCaption := SourceSettings.AppMessages.MsgSend_WindowCaption;
-      MsgSend_Title := SourceSettings.AppMessages.MsgSend_Title;
-      MsgSend_GroupTo := SourceSettings.AppMessages.MsgSend_GroupTo;
-      MsgSend_RadioUser := SourceSettings.AppMessages.MsgSend_RadioUser;
-      MsgSend_RadioAll := SourceSettings.AppMessages.MsgSend_RadioAll;
-      MsgSend_GroupMessage := SourceSettings.AppMessages.MsgSend_GroupMessage;
-      MsgSend_LabelSubject := SourceSettings.AppMessages.MsgSend_LabelSubject; //added by fduenas
-      MsgSend_LabelMessageText := SourceSettings.AppMessages.MsgSend_LabelMessageText; //added by fduenas
+      MsgSend_BtSend                            := SourceSettings.AppMessages.MsgSend_BtSend;
+      MsgSend_BtCancel                          := SourceSettings.AppMessages.MsgSend_BtCancel;
+      MsgSend_WindowCaption                     := SourceSettings.AppMessages.MsgSend_WindowCaption;
+      MsgSend_Title                             := SourceSettings.AppMessages.MsgSend_Title;
+      MsgSend_GroupTo                           := SourceSettings.AppMessages.MsgSend_GroupTo;
+      MsgSend_RadioUser                         := SourceSettings.AppMessages.MsgSend_RadioUser;
+      MsgSend_RadioAll                          := SourceSettings.AppMessages.MsgSend_RadioAll;
+      MsgSend_GroupMessage                      := SourceSettings.AppMessages.MsgSend_GroupMessage;
+      MsgSend_LabelSubject                      := SourceSettings.AppMessages.MsgSend_LabelSubject; //added by fduenas
+      MsgSend_LabelMessageText                  := SourceSettings.AppMessages.MsgSend_LabelMessageText; //added by fduenas
     end;
+
     Settings.XPStyleSet.Assign(SourceSettings.XPStyleSet);
     Settings.XPStyle := SourceSettings.XPStyle;
    //c Settings.WindowsPosition := SourceSettings.WindowsPosition;
+  except on E: Exception do
+    begin
+      ShowMessage('Erro ao aplicar permissões: ' + E.Message);
+      EncerrarAplicacao;
+    end;
+  end;
 end;
-
 
 {$IFDEF Ver130}
 function StrToBool ( Valor : String) : Boolean;
 begin
-  if Valor = '-1' then Result := True else Result := False;
+  if Valor = '-1' then
+    Result := True
+  else
+    Result := False;
 end;
 
 function BoolToStr ( Valor : Boolean) : String;
 begin
-  if Valor then Result := '-1' else Result := '0';
+  if Valor then
+    Result := '-1'
+  else
+    Result := '0';
 end;
 {$ENDIF}
 
@@ -2543,11 +3379,20 @@ end;
 
 procedure TCadastroUsuarios.Assign(Source: TPersistent);
 begin
-  if Source is TCadastroUsuarios then
-  begin
-    Self.MenuItem := TCadastroUsuarios(Source).MenuItem;
-    Self.Action := TCadastroUsuarios(Source).Action;
-  end else inherited;
+  try
+    if Source is TCadastroUsuarios then
+    begin
+      Self.MenuItem := TCadastroUsuarios(Source).MenuItem;
+      Self.Action   := TCadastroUsuarios(Source).Action;
+    end
+    else
+      inherited;
+  except on E: Exception do
+    begin
+      ShowMessage('Erro ao aplicar permissões: ' + E.Message);
+      EncerrarAplicacao;
+    end;
+  end;
 end;
 
 constructor TCadastroUsuarios.Create(AOwner: TComponent);
@@ -2560,99 +3405,189 @@ begin
   inherited;
 end;
 
-
 procedure TCadastroUsuarios.SetActCadUsu(const Value: TAction);
 begin
-  FActCadUsu := Value;
-  if Value <> nil then Value.FreeNotification(Self.Action);
+  try
+    FActCadUsu := Value;
+    if Value <> nil then
+      Value.FreeNotification(Self.Action);
+  except on E: Exception do
+    begin
+      ShowMessage('Erro ao aplicar permissões: ' + E.Message);
+      EncerrarAplicacao;
+    end;
+  end;
 end;
-
 
 procedure TCadastroUsuarios.SetMenuCadUsu(const Value: TMenuItem);
 begin
-  FMenuCadUsu := Value;
-  if Value <> nil then Value.FreeNotification(Self.MenuItem);
+  try
+    FMenuCadUsu := Value;
+    if Value <> nil then
+      Value.FreeNotification(Self.MenuItem);
+  except on E: Exception do
+    begin
+      ShowMessage('Erro ao aplicar permissões: ' + E.Message);
+      EncerrarAplicacao;
+    end;
+  end;
 end;
-
-
 
 { TLogin }
 
 procedure TLogin.Assign(Source: TPersistent);
 begin
-  if Source is TLogin then
-  begin
-    Self.MaxLoginAttempts := TLogin(Source).MaxLoginAttempts;
-  end else inherited;
+  try
+    if Source is TLogin then
+    begin
+      Self.MaxLoginAttempts := TLogin(Source).MaxLoginAttempts;
+    end
+    else
+      inherited;
+  except on E: Exception do
+    begin
+      ShowMessage('Erro ao aplicar permissões: ' + E.Message);
+      EncerrarAplicacao;
+    end;
+  end;
 end;
 
 constructor TLogin.Create(AOwner: TComponent);
 begin
-  inherited Create;
-  AutoLogon := TUCAutoLogin.Create(nil);
-  InitialLogin := TInitialLogin.Create(nil);
-  if not AutoLogon.MessageOnError  then AutoLogon.MessageOnError := True;
+  try
+    inherited Create;
+    AutoLogon    := TUCAutoLogin.Create(nil);
+    InitialLogin := TInitialLogin.Create(nil);
+
+    if not AutoLogon.MessageOnError then
+      AutoLogon.MessageOnError := True;
+  except on E: Exception do
+    begin
+      ShowMessage('Erro ao aplicar permissões: ' + E.Message);
+      EncerrarAplicacao;
+    end;
+  end;
 end;
 
 destructor TLogin.Destroy;
 begin
-  AutoLogon.Free; //added by fduenas
-  InitialLogin.Free; //added by fduenas
-  inherited;
+  try
+    AutoLogon.Free; //added by fduenas
+    InitialLogin.Free; //added by fduenas
+    inherited;
+  except on E: Exception do
+    begin
+      ShowMessage('Erro ao aplicar permissões: ' + E.Message);
+      EncerrarAplicacao;
+    end;
+  end;
 end;
-
 
 { TPerfilUsuarios }
 
 procedure TPerfilUsuarios.Assign(Source: TPersistent);
 begin
-  if Source is TPerfilUsuarios then
-  begin
-    Self.MenuItem := TPerfilUsuarios(Source).MenuItem;
-    Self.Action := TPerfilUsuarios(Source).Action;
-  end else inherited;
+  try
+    if Source is TPerfilUsuarios then
+    begin
+      Self.MenuItem := TPerfilUsuarios(Source).MenuItem;
+      Self.Action   := TPerfilUsuarios(Source).Action;
+    end
+    else
+      inherited;
+  except on E: Exception do
+    begin
+      ShowMessage('Erro ao aplicar permissões: ' + E.Message);
+      EncerrarAplicacao;
+    end;
+  end;
 end;
 
 constructor TPerfilUsuarios.Create(AOwner: TComponent);
 begin
+  try
   inherited Create;
+  except on E: Exception do
+    begin
+      ShowMessage('Erro ao aplicar permissões: ' + E.Message);
+      EncerrarAplicacao;
+    end;
+  end;
 end;
 
 destructor TPerfilUsuarios.Destroy;
 begin
-  inherited;
+  try
+    inherited;
+  except on E: Exception do
+    begin
+      ShowMessage('Erro ao aplicar permissões: ' + E.Message);
+      EncerrarAplicacao;
+    end;
+  end;
 end;
 
 procedure TPerfilUsuarios.SetActPerfUsu(const Value: TAction);
 begin
-  FActPerfUsu := Value;
-  if Value <> nil then Value.FreeNotification(Self.Action);
+  try
+    FActPerfUsu := Value;
+    if Value <> nil then
+      Value.FreeNotification(Self.Action);
+  except on E: Exception do
+    begin
+      ShowMessage('Erro ao aplicar permissões: ' + E.Message);
+      EncerrarAplicacao;
+    end;
+  end;
 end;
-
 
 procedure TPerfilUsuarios.SetMenuPerfUsu(const Value: TMenuItem);
 begin
-  FMenuPerfUsu := Value;
-  if Value <> nil then Value.FreeNotification(Self.MenuItem);
+  try
+    FMenuPerfUsu := Value;
+    if Value <> nil then
+      Value.FreeNotification(Self.MenuItem);
+  except on E: Exception do
+    begin
+      ShowMessage('Erro ao aplicar permissões: ' + E.Message);
+      EncerrarAplicacao;
+    end;
+  end;
 end;
 
 { TTrocarSenha }
 
 procedure TTrocarSenha.Assign(Source: TPersistent);
 begin
-  if Source is TTrocarSenha then
-  begin
-    Self.MenuItem := TTrocarSenha(Source).MenuItem;
-    Self.Action := TTrocarSenha(Source).Action;
+  try
+    if Source is TTrocarSenha then
+    begin
+      Self.MenuItem := TTrocarSenha(Source).MenuItem;
+      Self.Action   := TTrocarSenha(Source).Action;
 
-    Self.ForcePassword := TTrocarSenha(Source).ForcePassword;
-    Self.MinPasswordLength := TTrocarSenha(Source).MinPasswordLength;
-  end else inherited;
+      Self.ForcePassword     := TTrocarSenha(Source).ForcePassword;
+      Self.MinPasswordLength := TTrocarSenha(Source).MinPasswordLength;
+    end
+    else
+      inherited;
+  except on E: Exception do
+    begin
+      ShowMessage('Erro ao aplicar permissões: ' + E.Message);
+      EncerrarAplicacao;
+    end;
+  end;
 end;
 
 constructor TTrocarSenha.Create(AOwner: TComponent);
 begin
-  inherited Create;
+  try
+    inherited Create;
+  except on E: Exception do
+    begin
+      ShowMessage('Erro ao aplicar permissões: ' + E.Message);
+      EncerrarAplicacao;
+    end;
+  end;
 end;
 
 destructor TTrocarSenha.Destroy;
@@ -2662,104 +3597,204 @@ end;
 
 procedure TTrocarSenha.SetActChgPassUsu(const Value: TAction);
 begin
-  FActChgPass := Value;
-  if Value <> nil then Value.FreeNotification(Self.Action);
-end;
+  try
+    FActChgPass := Value;
 
+    if Value <> nil then
+      Value.FreeNotification(Self.Action);
+  except on E: Exception do
+    begin
+      ShowMessage('Erro ao aplicar permissões: ' + E.Message);
+      EncerrarAplicacao;
+    end;
+  end;
+end;
 
 procedure TTrocarSenha.SetMenuChgPassUsu(const Value: TMenuItem);
 begin
-  FMenuChgPassUsu := Value;
-  if Value <> nil then Value.FreeNotification(Self.MenuItem);
+  try
+    FMenuChgPassUsu := Value;
+
+    if Value <> nil then
+      Value.FreeNotification(Self.MenuItem);
+  except on E: Exception do
+    begin
+      ShowMessage('Erro ao aplicar permissões: ' + E.Message);
+      EncerrarAplicacao;
+    end;
+  end;
 end;
 
 { TInitialLogin }
 
 procedure TInitialLogin.Assign(Source: TPersistent);
 begin
-  if Source is TInitialLogin then
-  begin
-    Self.User := TInitialLogin(Source).User;
-    Self.Password := TInitialLogin(Source).Password;
-  end else inherited;
-
+  try
+    if Source is TInitialLogin then
+    begin
+      Self.User     := TInitialLogin(Source).User;
+      Self.Password := TInitialLogin(Source).Password;
+    end
+    else
+      inherited;
+  except on E: Exception do
+    begin
+      ShowMessage('Erro ao aplicar permissões: ' + E.Message);
+      EncerrarAplicacao;
+    end;
+  end;
 end;
 
 constructor TInitialLogin.Create(AOwner: TComponent);
 begin
-  inherited Create;
-  FPermINI := TStringList.Create;
+  try
+    inherited Create;
+    FPermINI := TStringList.Create;
+  except on E: Exception do
+    begin
+      ShowMessage('Erro ao aplicar permissões: ' + E.Message);
+      EncerrarAplicacao;
+    end;
+  end;
 end;
 
 destructor TInitialLogin.Destroy;
 begin
-  FreeAndNil(FPermIni); //added by fduenas
-  inherited;
+  try
+    FreeAndNil(FPermIni); //added by fduenas
+    inherited;
+  except on E: Exception do
+    begin
+      ShowMessage('Erro ao aplicar permissões: ' + E.Message);
+      EncerrarAplicacao;
+    end;
+  end;
 end;
 
 procedure TInitialLogin.SetFPermIni(const Value: TStrings);
 begin
-  FPermIni.Assign(Value);
+  try
+    FPermIni.Assign(Value);
+  except on E: Exception do
+    begin
+      ShowMessage('Erro ao aplicar permissões: ' + E.Message);
+      EncerrarAplicacao;
+    end;
+  end;
 end;
 
 { TUCControlRight }
 
 procedure TUCControlRight.Assign(Source: TPersistent);
 begin
-  if Source is TUCControlRight then
-  begin
-    Self.ActionList := TUCControlRight(Source).ActionList;
-    {$IFDEF UCACTMANAGER}
-    Self.ActionManager := TUCControlRight(Source).ActionManager;
-    {$ENDIF}
-  end else inherited;
-
+  try
+    if Source is TUCControlRight then
+    begin
+      Self.ActionList := TUCControlRight(Source).ActionList;
+      {$IFDEF UCACTMANAGER}
+      Self.ActionManager := TUCControlRight(Source).ActionManager;
+      {$ENDIF}
+    end
+    else
+      inherited;
+  except on E: Exception do
+    begin
+      ShowMessage('Erro ao aplicar permissões: ' + E.Message);
+      EncerrarAplicacao;
+    end;
+  end;
 end;
 
 constructor TUCControlRight.Create(AOwner: TComponent);
 begin
-  inherited Create;
+  try
+    inherited Create;
+  except on E: Exception do
+    begin
+      ShowMessage('Erro ao aplicar permissões: ' + E.Message);
+      EncerrarAplicacao;
+    end;
+  end;
 end;
 
 destructor TUCControlRight.Destroy;
 begin
-  inherited;
+  try
+    inherited;
+  except on E: Exception do
+    begin
+      ShowMessage('Erro ao aplicar permissões: ' + E.Message);
+      EncerrarAplicacao;
+    end;
+  end;
 end;
 
 procedure TUCControlRight.SetActionList(const Value: TActionList);
 begin
-  FActionList := Value;
-  if Value <> nil then
-  begin
-    Value.FreeNotification(Self.ActionList);
-    {$IFDEF UCACTMANAGER}
-    FActionManager := nil;
-    {$ENDIF}
+  try
+    FActionList := Value;
+    if Value <> nil then
+    begin
+      Value.FreeNotification(Self.ActionList);
+      {$IFDEF UCACTMANAGER}
+      FActionManager := nil;
+      {$ENDIF}
+    end;
+  except on E: Exception do
+    begin
+      ShowMessage('Erro ao aplicar permissões: ' + E.Message);
+      EncerrarAplicacao;
+    end;
   end;
 end;
+
 {$IFDEF UCACTMANAGER}
+
 procedure TUCControlRight.SetActionMainMenuBar(
   const Value: TActionMainMenuBar);
 begin
-  FActionMainMenuBar := Value;
-  if Value <> nil then Value.FreeNotification(Self.ActionMainMenuBar);
+  try
+    FActionMainMenuBar := Value;
+    if Value <> nil then
+      Value.FreeNotification(Self.ActionMainMenuBar);
+  except on E: Exception do
+    begin
+      ShowMessage('Erro ao aplicar permissões: ' + E.Message);
+      EncerrarAplicacao;
+    end;
+  end;
 end;
 
 procedure TUCControlRight.SetActionManager(const Value: TActionManager);
 begin
-  FActionManager := Value;
-  if Value <> nil then
-  begin
-    Value.FreeNotification(Self.ActionManager);
-    FActionList := nil;
+  try
+    FActionManager := Value;
+    if Value <> nil then
+    begin
+      Value.FreeNotification(Self.ActionManager);
+      FActionList := nil;
+    end;
+  except on E: Exception do
+    begin
+      ShowMessage('Erro ao aplicar permissões: ' + E.Message);
+      EncerrarAplicacao;
+    end;
   end;
 end;
 {$ENDIF}
 
 procedure TUCControlRight.SetMainMenu(const Value: TMenu);
 begin
-  FMainMenu := Value;
-  if Value <> nil then Value.FreeNotification(Self.MainMenu);
+  try
+    FMainMenu := Value;
+    if Value <> nil then
+      Value.FreeNotification(Self.MainMenu);
+  except on E: Exception do
+    begin
+      ShowMessage('Erro ao aplicar permissões: ' + E.Message);
+      EncerrarAplicacao;
+    end;
+  end;
 end;
 
 { TUCAppMessage }
@@ -2792,150 +3827,220 @@ begin
     Close;
     Free;
   end;
-
 end;
 
 constructor TUCAppMessage.Create(AOWner: TComponent);
 begin
-  inherited;
-  FReady := False;
-  if csDesigning in ComponentState then
-  begin
-    Interval := 60000;
-    Active := True;
+  try
+    inherited;
+    FReady := False;
+    if csDesigning in ComponentState then
+    begin
+      Interval := 60000;
+      Active := True;
+    end;
+    FVerifThread := TVerifThread.Create(True);
+    FVerifThread.AOwner := Self;
+    FVerifThread.FreeOnTerminate := True;
+  except on E: Exception do
+    begin
+      ShowMessage('Erro ao aplicar permissões: ' + E.Message);
+      EncerrarAplicacao;
+    end;
   end;
-  FVerifThread := TVerifThread.Create(True);
-  FVerifThread.AOwner := Self;
-  FVerifThread.FreeOnTerminate := True;
 end;
 
 procedure TUCAppMessage.DeleteAppMessage(IdMsg: Integer);
 begin
-  if MessageDlg(FUserControl.Settings.AppMessages.MsgsForm_PromptDelete, mtConfirmation, [mbYes, mbNo],0) <> mrYes then exit;
+  if MessageDlg(FUserControl.Settings.AppMessages.MsgsForm_PromptDelete, mtConfirmation, [mbYes, mbNo],0) <> mrYes then
+    exit;
+
   UserControl.DataConnector.UCExecSQL('Delete from '+ TableMessages + ' where IdMsg = '+ IntToStr(idMsg));
 end;
 
 destructor TUCAppMessage.Destroy;
 begin
-  if not (csDesigning in ComponentState) then
-  begin
-    FVerifThread.Terminate;
-    if Assigned(UserControl) then Usercontrol.DeleteLoginMonitor(Self);
+  try
+    if not (csDesigning in ComponentState) then
+    begin
+      FVerifThread.Terminate;
+      if Assigned(UserControl) then Usercontrol.DeleteLoginMonitor(Self);
+    end;
+    inherited Destroy;
+  except on E: Exception do
+    begin
+      ShowMessage('Erro ao aplicar permissões: ' + E.Message);
+      EncerrarAplicacao;
+    end;
   end;
-  inherited Destroy;
 end;
 
 procedure TUCAppMessage.Loaded;
 begin
-  inherited;
-  if not (csDesigning in ComponentState) then
-  begin
-    if not Assigned(FUserControl) then raise Exception.Create('Component UserControl not defined!');
-    Usercontrol.AddLoginMonitor(Self);
-    if not FUserControl.DataConnector.UCFindTable(TableMessages) then FUserControl.CriaTabelaMsgs(TableMessages);
-{    FVerifThread := TVerifThread.Create(True);
-    FVerifThread.AOwner := Self;
-    FVerifThread.FreeOnTerminate := True;}
+  try
+    inherited;
+    if not (csDesigning in ComponentState) then
+    begin
+      if not Assigned(FUserControl) then raise Exception.Create('Component UserControl not defined!');
+      Usercontrol.AddLoginMonitor(Self);
+      if not FUserControl.DataConnector.UCFindTable(TableMessages) then FUserControl.CriaTabelaMsgs(TableMessages);
+  {    FVerifThread := TVerifThread.Create(True);
+      FVerifThread.AOwner := Self;
+      FVerifThread.FreeOnTerminate := True;}
+    end;
+    FReady := True;
+  except on E: Exception do
+    begin
+      ShowMessage('Erro ao aplicar permissões: ' + E.Message);
+      EncerrarAplicacao;
+    end;
   end;
-  FReady := True;
 end;
 
 procedure TUCAppMessage.Notification(AComponent: TComponent;
   AOperation: TOperation);
 begin
-  If AOperation = opRemove then
-     If AComponent = FUserControl then
-        FUserControl := nil;
+  try
+    If AOperation = opRemove then
+       If AComponent = FUserControl then
+          FUserControl := nil;
 
-  inherited Notification(AComponent, AOperation);
-
+    inherited Notification(AComponent, AOperation);
+  except on E: Exception do
+    begin
+      ShowMessage('Erro ao aplicar permissões: ' + E.Message);
+      EncerrarAplicacao;
+    end;
+  end;
 end;
 
 procedure TUCAppMessage.SendAppMessage(ToUser: Integer; Subject, Msg: String);
 var
   UltId : integer;
 begin
-  with UserControl.DataConnector.UCGetSQLDataset('Select Max(idMsg) as nr from '+ TableMessages) do
-  begin
-    UltID := Fieldbyname('nr').asInteger +1;
-    Close;
-    Free;
-  end;
-  UserControl.DataConnector.UCExecSQL('Insert into '+ TableMessages + '( idMsg, UsrFrom, UsrTo, Subject, Msg, DtSend) Values ('+
-                        IntToStr(UltId)+ ', '+
-                        IntToStr(UserControl.CurrentUser.UserID)+', '+
-                        IntToStr(toUser)+', '+
-                        QuotedStr(Subject)+', '+
-                        QuotedStr(Msg)+', '+
-                        QuotedStr(FormatDateTime('YYYYMMDDHHMM',now))+')');
+  try
+    with UserControl.DataConnector.UCGetSQLDataset('Select Max(idMsg) as nr from '+ TableMessages) do
+    begin
+      UltID := Fieldbyname('nr').asInteger +1;
+      Close;
+      Free;
+    end;
+    UserControl.DataConnector.UCExecSQL('Insert into '+ TableMessages + '( idMsg, UsrFrom, UsrTo, Subject, Msg, DtSend) Values ('+
+                          IntToStr(UltId)+ ', '+
+                          IntToStr(UserControl.CurrentUser.UserID)+', '+
+                          IntToStr(toUser)+', '+
+                          QuotedStr(Subject)+', '+
+                          QuotedStr(Msg)+', '+
+                          QuotedStr(FormatDateTime('YYYYMMDDHHMM',now))+')');
 
+  except on E: Exception do
+    begin
+      ShowMessage('Erro ao aplicar permissões: ' + E.Message);
+      EncerrarAplicacao;
+    end;
+  end;
 end;
 
 procedure TUCAppMessage.SetActive(const Value: Boolean);
 begin
-  FActive := Value;
-  if (csDesigning in ComponentState) then exit;
-  if FActive then FVerifThread.Resume else FVerifThread.Suspend;
+  try
+    FActive := Value;
+    if (csDesigning in ComponentState) then
+      exit;
+    if FActive then
+      FVerifThread.Resume
+    else
+      FVerifThread.Suspend;
+  except on E: Exception do
+    begin
+      ShowMessage('Erro ao aplicar permissões: ' + E.Message);
+      EncerrarAplicacao;
+    end;
+  end;
 end;
 
 procedure TUCAppMessage.SetUserControl(const Value: TUserControl);
 begin
-  FUserControl := Value;
-  if Value <> nil then
-     Value.FreeNotification(self);
+  try
+    FUserControl := Value;
+    if Value <> nil then
+       Value.FreeNotification(self);
+  except on E: Exception do
+    begin
+      ShowMessage('Erro ao aplicar permissões: ' + E.Message);
+      EncerrarAplicacao;
+    end;
+  end;
 end;
 
 procedure TUCAppMessage.ShowMessages;
 begin
-  MsgsForm := TMsgsForm.Create(self);
-  with FUserControl.Settings.AppMessages do
-  begin
-    MsgsForm.Caption := MsgsForm_WindowCaption;
-    MsgsForm.btnova.Caption := MsgsForm_BtNew;
-    MsgsForm.btResponder.Caption := MsgsForm_BtReplay;
-    MsgsForm.btEncaminhar.Caption := MsgsForm_BtForward;
-    MsgsForm.btExcluir.Caption := MsgsForm_BtDelete;
-    MsgsForm.btFechar.Caption := MsgsForm_BtClose;
+  try
+    MsgsForm := TMsgsForm.Create(self);
+    with FUserControl.Settings.AppMessages do
+    begin
+      MsgsForm.Caption                      := MsgsForm_WindowCaption;
+      MsgsForm.btnova.Caption               := MsgsForm_BtNew;
+      MsgsForm.btResponder.Caption          := MsgsForm_BtReplay;
+      MsgsForm.btEncaminhar.Caption         := MsgsForm_BtForward;
+      MsgsForm.btExcluir.Caption            := MsgsForm_BtDelete;
+      MsgsForm.btFechar.Caption             := MsgsForm_BtClose;
 
-    MsgsForm.ListView1.Columns[0].Caption := MsgsForm_ColFrom;
-    MsgsForm.ListView1.Columns[1].Caption := MsgsForm_ColSubject;
-    MsgsForm.ListView1.Columns[2].Caption := MsgsForm_ColDate;
+      MsgsForm.ListView1.Columns[0].Caption := MsgsForm_ColFrom;
+      MsgsForm.ListView1.Columns[1].Caption := MsgsForm_ColSubject;
+      MsgsForm.ListView1.Columns[2].Caption := MsgsForm_ColDate;
+    end;
+
+    MsgsForm.DSMsgs := UserControl.DataConnector.UCGetSQLDataset('SELECT UCM.IdMsg, UCM.UsrFrom, UCC.'+Self.UserControl.TableUsers.FieldUserName+' AS De, UCC_1.'+Self.UserControl.TableUsers.FieldUserName+' AS Para, UCM.Subject, UCM.Msg, UCM.DtSend, UCM.DtReceive '+
+                                     ' FROM ('+ TableMessages + ' UCM '+
+                                     ' INNER JOIN '+ UserControl.TableUsers.TableName+ ' UCC ON UCM.UsrFrom = UCC.'+Self.UserControl.TableUsers.FieldUserID+') '+
+                                     ' INNER JOIN '+ UserControl.TableUsers.TableName+ ' UCC_1 ON UCM.UsrTo = UCC_1.'+Self.UserControl.TableUsers.FieldUserID+
+                                     ' WHERE UCM.UsrTo = '+IntToStr(UserControl.CurrentUser.UserID)+
+                                     ' ORDER BY UCM.DtReceive DESC');
+    MsgsForm.DSMsgs.Open;
+    MsgsForm.DSUsuarios := UserControl.DataConnector.UCGetSQLDataset('SELECT ' +
+                             UserControl.TableUsers.FieldUserID + ' as idUser, ' +
+                             UserControl.TableUsers.FieldLogin + ' as Login, ' +
+                             UserControl.TableUsers.FieldUserName + ' as Nome, ' +
+                             UserControl.TableUsers.FieldPassword + ' as Senha, ' +
+                             UserControl.TableUsers.FieldEmail + ' as Email, ' +
+                             UserControl.TableUsers.FieldPrivileged + ' as Privilegiado, ' +
+                             UserControl.TableUsers.FieldTypeRec + ' as Tipo, ' +
+                             UserControl.TableUsers.FieldProfile + ' as Perfil '+
+                             ' FROM '+ UserControl.TableUsers.TableName +
+                             ' WHERE '+ UserControl.TableUsers.FieldUserID + ' <> ' +IntToStr(UserControl.CurrentUser.UserID)+
+                             ' AND ' + UserControl.TableUsers.FieldTypeRec  + ' = ' + QuotedStr('U') +
+                             ' ORDER BY ' + UserControl.TableUsers.FieldUserName);
+    MsgsForm.DSUsuarios.Open;
+
+   //c MsgsForm.Position := Self.FUserControl.Settings.WindowsPosition;
+
+    MsgsForm.ShowModal;
+    FreeAndNil(MsgsForm)
+  except on E: Exception do
+    begin
+      ShowMessage('Erro ao aplicar permissões: ' + E.Message);
+      EncerrarAplicacao;
+    end;
   end;
-
-  MsgsForm.DSMsgs := UserControl.DataConnector.UCGetSQLDataset('SELECT UCM.IdMsg, UCM.UsrFrom, UCC.'+Self.UserControl.TableUsers.FieldUserName+' AS De, UCC_1.'+Self.UserControl.TableUsers.FieldUserName+' AS Para, UCM.Subject, UCM.Msg, UCM.DtSend, UCM.DtReceive '+
-                                   'FROM ('+ TableMessages + ' UCM INNER JOIN '+ UserControl.TableUsers.TableName+ ' UCC ON UCM.UsrFrom = UCC.'+Self.UserControl.TableUsers.FieldUserID+') '+
-                                   ' INNER JOIN '+ UserControl.TableUsers.TableName+ ' UCC_1 ON UCM.UsrTo = UCC_1.'+Self.UserControl.TableUsers.FieldUserID+' WHERE UCM.UsrTo = '+IntToStr(UserControl.CurrentUser.UserID)+' ORDER BY UCM.DtReceive DESC');
-  MsgsForm.DSMsgs.Open;
-  MsgsForm.DSUsuarios := UserControl.DataConnector.UCGetSQLDataset('SELECT ' +
-                           UserControl.TableUsers.FieldUserID + ' as idUser, ' +
-                           UserControl.TableUsers.FieldLogin + ' as Login, ' +
-                           UserControl.TableUsers.FieldUserName + ' as Nome, ' +
-                           UserControl.TableUsers.FieldPassword + ' as Senha, ' +
-                           UserControl.TableUsers.FieldEmail + ' as Email, ' +
-                           UserControl.TableUsers.FieldPrivileged + ' as Privilegiado, ' +
-                           UserControl.TableUsers.FieldTypeRec + ' as Tipo, ' +
-                           UserControl.TableUsers.FieldProfile + ' as Perfil '+
-                           ' FROM '+ UserControl.TableUsers.TableName +
-                           ' WHERE '+ UserControl.TableUsers.FieldUserID + ' <> ' +IntToStr(UserControl.CurrentUser.UserID)+
-                           ' AND ' + UserControl.TableUsers.FieldTypeRec  + ' = ' + QuotedStr('U') +
-                           ' ORDER BY ' + UserControl.TableUsers.FieldUserName);
-  MsgsForm.DSUsuarios.Open;
-
- //c MsgsForm.Position := Self.FUserControl.Settings.WindowsPosition;
-
-  MsgsForm.ShowModal;
-  FreeAndNil(MsgsForm)
 end;
 
 { TVerifThread }
 
 procedure TVerifThread.Execute;
 begin
-  while not self.Terminated do
-  begin
-    if (Assigned(TUCAppMessage(AOwner).UserControl)) and
-    (TUCAppMessage(AOwner).UserControl.CurrentUser.UserID <> 0) then Synchronize(VerNovaMsg);
-    Sleep(TUCAppMessage(aowner).Interval);
+  try
+    while not self.Terminated do
+    begin
+      if (Assigned(TUCAppMessage(AOwner).UserControl)) and (TUCAppMessage(AOwner).UserControl.CurrentUser.UserID <> 0) then
+        Synchronize(VerNovaMsg);
+      Sleep(TUCAppMessage(aowner).Interval);
+    end;
+  except on E: Exception do
+    begin
+      ShowMessage('Erro ao aplicar permissões: ' + E.Message);
+      EncerrarAplicacao;
+    end;
   end;
 end;
 
@@ -2943,396 +4048,829 @@ procedure TVerifThread.VerNovaMsg;
 var
   AOW : TUCAppMessage;
 begin
-  AOW := TUCAppMessage(AOwner);
-  AOW.CheckMessages;
+  try
+    AOW := TUCAppMessage(AOwner);
+    AOW.CheckMessages;
+  except on E: Exception do
+    begin
+      ShowMessage('Erro ao aplicar permissões: ' + E.Message);
+      EncerrarAplicacao;
+    end;
+  end;
 end;
 
 { TUCSettings }
 procedure TUCSettings.Assign(Source: TPersistent);
 begin
-  if Source is TUserSettings then
-  begin
-    Self.CommonMessages.Assign(TUserSettings(Source).CommonMessages); //modified by fduenas
-    Self.AppMessages.Assign(TUserSettings(Source).AppMessages); //modified by fduenas
-    Self.XPStyleSet.Assign(TUserSettings(Source).XPStyleSet); //modified by fduenas
-  end else inherited;
+  try
+    if Source is TUserSettings then
+    begin
+      Self.CommonMessages.Assign(TUserSettings(Source).CommonMessages); //modified by fduenas
+      Self.AppMessages.Assign(TUserSettings(Source).AppMessages); //modified by fduenas
+      Self.XPStyleSet.Assign(TUserSettings(Source).XPStyleSet); //modified by fduenas
+    end
+    else
+      inherited;
+  except on E: Exception do
+    begin
+      ShowMessage('Erro ao aplicar permissões: ' + E.Message);
+      EncerrarAplicacao;
+    end;
+  end;
 end;
 
 constructor TUCSettings.Create(AOwner: TComponent);
 begin
-  inherited;
+  try
+    inherited;
 
-  FAppMessagesMSG := TAppMessagesMSG.Create(nil);
-  FLoginFormMSG := TLoginFormMSG.Create(nil);
-  FUserCommomMSG := TUserCommonMSG.Create(nil);
-  FCadUserFormMSG := TCadUserFormMSG.Create(nil);
-  FAddUserFormMSG := TAddUserFormMSG.Create(nil);
-  FAddProfileFormMSG := TAddProfileFormMSG.Create(nil);
-  FPermissFormMSG := TPermissFormMSG.Create(nil);
-  FProfileUserFormMSG := TProfileUserFormMSG.Create(nil);
-  FTrocaSenhaFormMSG := TTrocaSenhaFormMSG.Create(nil);
-  FResetPassword := TResetPassword.Create(nil);
-  FLogControlFormMSG := TLogControlFormMSG.Create(nil);
-  FUCXPSettings := TUCXPSettings.Create(nil);
+    FAppMessagesMSG     := TAppMessagesMSG.Create(nil);
+    FLoginFormMSG       := TLoginFormMSG.Create(nil);
+    FUserCommomMSG      := TUserCommonMSG.Create(nil);
+    FCadUserFormMSG     := TCadUserFormMSG.Create(nil);
+    FAddUserFormMSG     := TAddUserFormMSG.Create(nil);
+    FAddProfileFormMSG  := TAddProfileFormMSG.Create(nil);
+    FPermissFormMSG     := TPermissFormMSG.Create(nil);
+    FProfileUserFormMSG := TProfileUserFormMSG.Create(nil);
+    FTrocaSenhaFormMSG  := TTrocaSenhaFormMSG.Create(nil);
+    FResetPassword      := TResetPassword.Create(nil);
+    FLogControlFormMSG  := TLogControlFormMSG.Create(nil);
+    FUCXPSettings       := TUCXPSettings.Create(nil);
 
-  {
-  FAppMessagesMSG := TAppMessagesMSG.Create(nil);
-  FLoginFormMSG := TLoginFormMSG.Create(Self);
-  FUserCommomMSG := TUserCommonMSG.Create(Self);
-  FCadUserFormMSG := TCadUserFormMSG.Create(Self);
-  FAddUserFormMSG := TAddUserFormMSG.Create(Self);
-  FAddProfileFormMSG := TAddProfileFormMSG.Create(Self);
-  FPermissFormMSG := TPermissFormMSG.Create(Self);
-  FProfileUserFormMSG := TProfileUserFormMSG.Create(Self);
-  FTrocaSenhaFormMSG := TTrocaSenhaFormMSG.Create(Self);
-  FResetPassword := TResetPassword.Create(Self);
-  FLogControlFormMSG := TLogControlFormMSG.Create(Self);
-  FUCXPSettings := TUCXPSettings.Create(Self);
-  }
-  if csDesigning in ComponentState then IniSettings2(Self);
-
+    if csDesigning in ComponentState then
+      IniSettings2(Self);
+  except on E: Exception do
+    begin
+      ShowMessage('Erro ao aplicar permissões: ' + E.Message);
+      EncerrarAplicacao;
+    end;
+  end;
 end;
 
 destructor TUCSettings.Destroy;
 begin
-  //added by fduenas
-  FAppMessagesMSG.Free;
-  FLoginFormMSG.Free;
-  FUserCommomMSG.Free;
-  FCadUserFormMSG.Free;
-  FAddUserFormMSG.Free;
-  FAddProfileFormMSG.Free;
-  FPermissFormMSG.Free;
-  FProfileUserFormMSG.Free;
-  FTrocaSenhaFormMSG.Free;
-  FResetPassword.Free;
-  FLogControlFormMSG.Free;
-  FUCXPSettings.Free;
+  try
+    //added by fduenas
+    FAppMessagesMSG.Free;
+    FLoginFormMSG.Free;
+    FUserCommomMSG.Free;
+    FCadUserFormMSG.Free;
+    FAddUserFormMSG.Free;
+    FAddProfileFormMSG.Free;
+    FPermissFormMSG.Free;
+    FProfileUserFormMSG.Free;
+    FTrocaSenhaFormMSG.Free;
+    FResetPassword.Free;
+    FLogControlFormMSG.Free;
+    FUCXPSettings.Free;
 
-  inherited;
+    inherited;
+  except on E: Exception do
+    begin
+      ShowMessage('Erro ao aplicar permissões: ' + E.Message);
+      EncerrarAplicacao;
+    end;
+  end;
 end;
-
 
 procedure TUCSettings.SetAppMessagesMSG(const Value: TAppMessagesMSG);
 begin
-  FAppMessagesMSG := Value;
+  try
+    FAppMessagesMSG := Value;
+  except on E: Exception do
+    begin
+      ShowMessage('Erro ao aplicar permissões: ' + E.Message);
+      EncerrarAplicacao;
+    end;
+  end;
 end;
 
 procedure TUCSettings.SetFAddProfileFormMSG(
   const Value: TAddProfileFormMSG);
 begin
-  FAddProfileFormMSG := Value;
+  try
+    FAddProfileFormMSG := Value;
+  except on E: Exception do
+    begin
+      ShowMessage('Erro ao aplicar permissões: ' + E.Message);
+      EncerrarAplicacao;
+    end;
+  end;
 end;
 
 procedure TUCSettings.SetFAddUserFormMSG(const Value: TAddUserFormMSG);
 begin
-  FAddUserFormMSG := Value;
+  try
+    FAddUserFormMSG := Value;
+  except on E: Exception do
+    begin
+      ShowMessage('Erro ao aplicar permissões: ' + E.Message);
+      EncerrarAplicacao;
+    end;
+  end;
 end;
 
 procedure TUCSettings.SetFCadUserFormMSG(const Value: TCadUserFormMSG);
 begin
-  FCadUserFormMSG := Value;
+  try
+    FCadUserFormMSG := Value;
+  except on E: Exception do
+    begin
+      ShowMessage('Erro ao aplicar permissões: ' + E.Message);
+      EncerrarAplicacao;
+    end;
+  end;
 end;
 
 procedure TUCSettings.SetFFormLoginMsg(const Value: TLoginFormMSG);
 begin
-  FLoginFormMSG := Value;
+  try
+    FLoginFormMSG := Value;
+  except on E: Exception do
+    begin
+      ShowMessage('Erro ao aplicar permissões: ' + E.Message);
+      EncerrarAplicacao;
+    end;
+  end;
 end;
 
 procedure TUCSettings.SetFLogControlFormMSG(
   const Value: TLogControlFormMSG);
 begin
-  FLogControlFormMSG := Value;
+  try
+    FLogControlFormMSG := Value;
+  except on E: Exception do
+    begin
+      ShowMessage('Erro ao aplicar permissões: ' + E.Message);
+      EncerrarAplicacao;
+    end;
+  end;
 end;
 
 procedure TUCSettings.SetFPermissFormMSG(const Value: TPermissFormMSG);
 begin
-  FPermissFormMSG := Value;
+  try
+    FPermissFormMSG := Value;
+  except on E: Exception do
+    begin
+      ShowMessage('Erro ao aplicar permissões: ' + E.Message);
+      EncerrarAplicacao;
+    end;
+  end;
 end;
 
 procedure TUCSettings.SetFProfileUserFormMSG(
   const Value: TProfileUserFormMSG);
 begin
-  FProfileUserFormMSG := Value;
+  try
+    FProfileUserFormMSG := Value;
+  except on E: Exception do
+    begin
+      ShowMessage('Erro ao aplicar permissões: ' + E.Message);
+      EncerrarAplicacao;
+    end;
+  end;
 end;
 
 procedure TUCSettings.SetFResetPassword(const Value: TResetPassword);
 begin
-  FResetPassword := Value;
+  try
+    FResetPassword := Value;
+  except on E: Exception do
+    begin
+      ShowMessage('Erro ao aplicar permissões: ' + E.Message);
+      EncerrarAplicacao;
+    end;
+  end;
 end;
 
 procedure TUCSettings.SetFTrocaSenhaFormMSG(
   const Value: TTrocaSenhaFormMSG);
 begin
-  FTrocaSenhaFormMSG := Value;
+  try
+    FTrocaSenhaFormMSG := Value;
+  except on E: Exception do
+    begin
+      ShowMessage('Erro ao aplicar permissões: ' + E.Message);
+      EncerrarAplicacao;
+    end;
+  end;
 end;
 
 procedure TUCSettings.SetFUserCommonMSg(const Value: TUserCommonMSG);
 begin
-  FUserCommomMSG := Value;
+  try
+    FUserCommomMSG := Value;
+  except on E: Exception do
+    begin
+      ShowMessage('Erro ao aplicar permissões: ' + E.Message);
+      EncerrarAplicacao;
+    end;
+  end;
 end;
-
 
 procedure IniSettings2(DestSettings: TUCSettings);
 var
   tmp : TBitmap;
 begin
+  try
     with DestSettings.CommonMessages do
     begin
-      if BlankPassword = '' then BlankPassword := Const_Men_SenhaDesabitada;
-      if PasswordChanged = '' then PasswordChanged := Const_Men_SenhaAlterada;
-      if InitialMessage.Text = '' then InitialMessage.Text := Const_Men_MsgInicial;
-      if MaxLoginAttemptsError = '' then MaxLoginAttemptsError := Const_Men_MaxTentativas;
-      if InvalidLogin = '' then InvalidLogin := Const_Men_LoginInvalido;
-      if AutoLogonError = '' then AutoLogonError := Const_Men_AutoLogonError;
+      if BlankPassword = '' then
+        BlankPassword := Const_Men_SenhaDesabitada;
+
+      if PasswordChanged = '' then
+        PasswordChanged := Const_Men_SenhaAlterada;
+
+      if InitialMessage.Text = '' then
+        InitialMessage.Text := Const_Men_MsgInicial;
+
+      if MaxLoginAttemptsError = '' then
+        MaxLoginAttemptsError := Const_Men_MaxTentativas;
+
+      if InvalidLogin = '' then
+        InvalidLogin := Const_Men_LoginInvalido;
+
+      if AutoLogonError = '' then
+        AutoLogonError := Const_Men_AutoLogonError;
     end;
+
     with DestSettings.Login do
     begin
-      if BtCancel = '' then BtCancel := Const_Log_BtCancelar;
-      if BtOK = '' then BtOK := Const_Log_BtOK;
-      if LabelPassword = '' then LabelPassword := Const_Log_LabelSenha;
-      if LabelUser = '' then LabelUser := Const_Log_LabelUsuario;
-      if WindowCaption = '' then WindowCaption := Const_Log_WindowCaption;
+      if BtCancel = '' then
+        BtCancel := Const_Log_BtCancelar;
+
+      if BtOK = '' then
+        BtOK := Const_Log_BtOK;
+
+      if LabelPassword = '' then
+        LabelPassword := Const_Log_LabelSenha;
+
+      if LabelUser = '' then
+        LabelUser := Const_Log_LabelUsuario;
+
+      if WindowCaption = '' then
+        WindowCaption := Const_Log_WindowCaption;
 
       Tmp := TBitmap.create;
       Tmp.LoadFromResourceName(HInstance, 'UCLOCKLOGIN');
       LeftImage.Assign(tmp);
       FreeAndNil(tmp);
     end;
+
     with DestSettings.UsersForm do
     begin
-      if WindowCaption = '' then WindowCaption := Const_Cad_WindowCaption;
-      if LabelDescription = '' then LabelDescription := Const_Cad_LabelDescricao;
-      if ColName = '' then ColName := Const_Cad_ColunaNome;
-      if ColLogin = '' then ColLogin := Const_Cad_ColunaLogin;
-      if ColEmail = '' then ColEmail := Const_Cad_ColunaEmail;
-      if BtAdd = '' then BtAdd := Const_Cad_BtAdicionar;
-      if BtChange = '' then BtChange := Const_Cad_BtAlterar;
-      if BtDelete = '' then BtDelete := Const_Cad_BtExcluir;
-      if BtRights = '' then BtRights := Const_Cad_BtPermissoes;
-      if BtPassword = '' then BtPassword := Const_Cad_BtSenha;
-      if BtClose = '' then BtClose := Const_Cad_BtFechar;
-      if PromptDelete = '' then PromptDelete := Const_Cad_ConfirmaExcluir;
-      if PromptDelete_WindowCaption = '' then PromptDelete_WindowCaption := Const_Cad_ConfirmaDelete_WindowCaption; //added by fduenas
+      if WindowCaption = '' then
+        WindowCaption := Const_Cad_WindowCaption;
+
+      if LabelDescription = '' then
+        LabelDescription := Const_Cad_LabelDescricao;
+
+      if ColName = '' then
+        ColName := Const_Cad_ColunaNome;
+
+      if ColLogin = '' then
+        ColLogin := Const_Cad_ColunaLogin;
+
+      if ColEmail = '' then
+        ColEmail := Const_Cad_ColunaEmail;
+
+      if BtAdd = '' then
+        BtAdd := Const_Cad_BtAdicionar;
+
+      if BtChange = '' then
+        BtChange := Const_Cad_BtAlterar;
+
+      if BtDelete = '' then
+        BtDelete := Const_Cad_BtExcluir;
+
+      if BtRights = '' then
+        BtRights := Const_Cad_BtPermissoes;
+
+      if BtPassword = '' then
+        BtPassword := Const_Cad_BtSenha;
+
+      if BtClose = '' then
+        BtClose := Const_Cad_BtFechar;
+
+      if PromptDelete = '' then
+        PromptDelete := Const_Cad_ConfirmaExcluir;
+
+      if PromptDelete_WindowCaption = '' then
+        PromptDelete_WindowCaption := Const_Cad_ConfirmaDelete_WindowCaption; //added by fduenas
     end;
+
     with DestSettings.UsersProfile do
     begin
-      if WindowCaption = '' then WindowCaption := Const_Prof_WindowCaption;
-      if LabelDescription = '' then LabelDescription := Const_Prof_LabelDescricao;
-      if ColProfile = '' then ColProfile := Const_Prof_ColunaNome;
-      if BtAdd = '' then BtAdd := Const_Prof_BtAdicionar;
-      if BtChange = '' then BtChange := Const_Prof_BtAlterar;
-      if BtDelete = '' then BtDelete := Const_Prof_BtExcluir;
-      if BtRights = '' then BtRights := Const_Prof_BtPermissoes;
-      if BtClose = '' then BtClose := Const_Prof_BtFechar;
-      if PromptDelete = '' then PromptDelete := Const_Prof_ConfirmaExcluir;
-      if PromptDelete_WindowCaption = '' then PromptDelete_WindowCaption := Const_Prof_ConfirmaDelete_WindowCaption; //added by fduenas
+      if WindowCaption = '' then
+        WindowCaption := Const_Prof_WindowCaption;
+
+      if LabelDescription = '' then
+        LabelDescription := Const_Prof_LabelDescricao;
+
+      if ColProfile = '' then
+        ColProfile := Const_Prof_ColunaNome;
+
+      if BtAdd = '' then
+        BtAdd := Const_Prof_BtAdicionar;
+
+      if BtChange = '' then
+        BtChange := Const_Prof_BtAlterar;
+
+      if BtDelete = '' then
+        BtDelete := Const_Prof_BtExcluir;
+
+      if BtRights = '' then
+        BtRights := Const_Prof_BtPermissoes;
+
+      if BtClose = '' then
+        BtClose := Const_Prof_BtFechar;
+
+      if PromptDelete = '' then
+        PromptDelete := Const_Prof_ConfirmaExcluir;
+
+      if PromptDelete_WindowCaption = '' then
+        PromptDelete_WindowCaption := Const_Prof_ConfirmaDelete_WindowCaption; //added by fduenas
     end;
+
     with DestSettings.AddChangeUser do
     begin
-      if WindowCaption = '' then WindowCaption := Const_Inc_WindowCaption;
-      if LabelAdd = '' then LabelAdd := Const_Inc_LabelAdicionar;
-      if LabelChange = '' then LabelChange := Const_Inc_LabelAlterar;
-      if LabelName = '' then LabelName := Const_Inc_LabelNome;
-      if LabelLogin = '' then LabelLogin := Const_Inc_LabelLogin;
-      if LabelEmail = '' then LabelEmail := Const_Inc_LabelEmail;
-      if CheckPrivileged = '' then CheckPrivileged := Const_Inc_CheckPrivilegiado;
-      if BtSave = '' then BtSave := Const_Inc_BtGravar;
-      if BtCancel = '' then BtCancel := Const_Inc_BtCancelar;
+      if WindowCaption = '' then
+        WindowCaption := Const_Inc_WindowCaption;
+
+      if LabelAdd = '' then
+        LabelAdd := Const_Inc_LabelAdicionar;
+
+      if LabelChange = '' then
+        LabelChange := Const_Inc_LabelAlterar;
+
+      if LabelName = '' then
+        LabelName := Const_Inc_LabelNome;
+
+      if LabelLogin = '' then
+        LabelLogin := Const_Inc_LabelLogin;
+
+      if LabelEmail = '' then
+        LabelEmail := Const_Inc_LabelEmail;
+
+      if CheckPrivileged = '' then
+        CheckPrivileged := Const_Inc_CheckPrivilegiado;
+
+      if BtSave = '' then
+        BtSave := Const_Inc_BtGravar;
+
+      if BtCancel = '' then
+        BtCancel := Const_Inc_BtCancelar;
     end;
+
     with DestSettings.AddChangeProfile do
     begin
-      if WindowCaption = '' then WindowCaption := Const_PInc_WindowCaption;
-      if LabelAdd = '' then LabelAdd := Const_PInc_LabelAdicionar;
-      if LabelChange = '' then LabelChange := Const_PInc_LabelAlterar;
-      if LabelName = '' then LabelName := Const_PInc_LabelNome;
-      if BtSave = '' then BtSave := Const_PInc_BtGravar;
-      if BtCancel = '' then BtCancel := Const_PInc_BtCancelar;
+      if WindowCaption = '' then
+        WindowCaption := Const_PInc_WindowCaption;
+
+      if LabelAdd = '' then
+        LabelAdd := Const_PInc_LabelAdicionar;
+
+      if LabelChange = '' then
+        LabelChange := Const_PInc_LabelAlterar;
+
+      if LabelName = '' then
+        LabelName := Const_PInc_LabelNome;
+
+      if BtSave = '' then
+        BtSave := Const_PInc_BtGravar;
+
+      if BtCancel = '' then
+        BtCancel := Const_PInc_BtCancelar;
     end;
+
     with DestSettings.Rights do
     begin
-      if WindowCaption = '' then WindowCaption := Const_Perm_WindowCaption;
-      if LabelUser = '' then LabelUser := Const_Perm_LabelUsuario;
-      if LabelProfile = '' then LabelProfile := Const_Perm_LabelPerfil;
-      if PageMenu = '' then PageMenu := Const_Perm_PageMenu;
-      if PageActions = '' then PageActions := Const_Perm_PageActions;
-      if BtUnlock = '' then BtUnlock := Const_Perm_BtLibera;
-      if BtLock = '' then BtLock := Const_Perm_BtBloqueia;
-      if BtSave = '' then BtSave := Const_Perm_BtGravar;
-      if BtCancel = '' then BtCancel := Const_Perm_BtCancelar;
+      if WindowCaption = '' then
+        WindowCaption := Const_Perm_WindowCaption;
+
+      if LabelUser = '' then
+        LabelUser := Const_Perm_LabelUsuario;
+
+      if LabelProfile = '' then
+        LabelProfile := Const_Perm_LabelPerfil;
+
+      if PageMenu = '' then
+        PageMenu := Const_Perm_PageMenu;
+
+      if PageActions = '' then
+        PageActions := Const_Perm_PageActions;
+
+      if BtUnlock = '' then
+        BtUnlock := Const_Perm_BtLibera;
+
+      if BtLock = '' then
+        BtLock := Const_Perm_BtBloqueia;
+
+      if BtSave = '' then
+        BtSave := Const_Perm_BtGravar;
+
+      if BtCancel = '' then
+        BtCancel := Const_Perm_BtCancelar;
     end;
+
     with DestSettings.ChangePassword do
     begin
-      if WindowCaption = '' then WindowCaption := Const_Troc_WindowCaption;
-      if LabelDescription = '' then LabelDescription := Const_Troc_LabelDescricao;
-      if LabelCurrentPassword = '' then LabelCurrentPassword := Const_Troc_LabelSenhaAtual;
-      if LabelNewPassword = '' then LabelNewPassword := Const_Troc_LabelNovaSenha;
-      if LabelConfirm = '' then LabelConfirm := Const_Troc_LabelConfirma;
-      if BtSave = '' then BtSave := Const_Troc_BtGravar;
-      if BtCancel = '' then BtCancel := Const_Troc_BtCancelar;
+      if WindowCaption = '' then
+        WindowCaption := Const_Troc_WindowCaption;
+
+      if LabelDescription = '' then
+        LabelDescription := Const_Troc_LabelDescricao;
+
+      if LabelCurrentPassword = '' then
+        LabelCurrentPassword := Const_Troc_LabelSenhaAtual;
+
+      if LabelNewPassword = '' then
+        LabelNewPassword := Const_Troc_LabelNovaSenha;
+
+      if LabelConfirm = '' then
+        LabelConfirm := Const_Troc_LabelConfirma;
+
+      if BtSave = '' then
+        BtSave := Const_Troc_BtGravar;
+
+      if BtCancel = '' then
+        BtCancel := Const_Troc_BtCancelar;
     end;
+
     with DestSettings.CommonMessages.ChangePasswordError do
     begin
-      if InvalidCurrentPassword = '' then InvalidCurrentPassword :=  Const_ErrPass_SenhaAtualInvalida;
-      if NewPasswordError = '' then NewPasswordError :=  Const_ErrPass_ErroNovaSenha;
-      if NewEqualCurrent = '' then NewEqualCurrent :=  Const_ErrPass_NovaIgualAtual;
-      if PasswordRequired = '' then PasswordRequired :=  Const_ErrPass_SenhaObrigatoria;
-      if MinPasswordLength = '' then MinPasswordLength := Const_ErrPass_SenhaMinima;
-      if InvalidNewPassword= '' then InvalidNewPassword :=  Const_ErrPass_SenhaInvalida;
+      if InvalidCurrentPassword = '' then
+        InvalidCurrentPassword :=  Const_ErrPass_SenhaAtualInvalida;
+
+      if NewPasswordError = '' then
+        NewPasswordError :=  Const_ErrPass_ErroNovaSenha;
+
+      if NewEqualCurrent = '' then
+        NewEqualCurrent :=  Const_ErrPass_NovaIgualAtual;
+
+      if PasswordRequired = '' then
+        PasswordRequired :=  Const_ErrPass_SenhaObrigatoria;
+
+      if MinPasswordLength = '' then
+        MinPasswordLength := Const_ErrPass_SenhaMinima;
+
+      if InvalidNewPassword= '' then
+        InvalidNewPassword :=  Const_ErrPass_SenhaInvalida;
     end;
+
     with DestSettings.ResetPassword do
     begin
-      if WindowCaption = '' then WindowCaption := Const_DefPass_WindowCaption;
-      if LabelPassword = '' then LabelPassword := Const_DefPass_LabelSenha;
+      if WindowCaption = '' then
+        WindowCaption := Const_DefPass_WindowCaption;
+
+      if LabelPassword = '' then
+        LabelPassword := Const_DefPass_LabelSenha;
     end;
+
     with DestSettings.Log do
     begin
-      if WindowCaption = '' then WindowCaption := Const_LogC_WindowCaption;
-      if LabelDescription = '' then LabelDescription := Const_LogC_LabelDescricao;
-      if LabelUser = '' then LabelUser := Const_LogC_LabelUsuario;
-      if LabelDate = '' then LabelDate := Const_LogC_LabelData;
-      if LabelLevel = '' then LabelLevel := Const_LogC_LabelNivel;
-      if ColLevel = '' then ColLevel := Const_LogC_ColunaNivel;
-      if ColMessage = '' then ColMessage := Const_LogC_ColunaMensagem;
-      if ColUser = '' then ColUser := Const_LogC_ColunaUsuario;
-      if ColDate = '' then ColDate := Const_LogC_ColunaData;
-      if BtFilter = '' then BtFilter := Const_LogC_BtFiltro;
-      if BtDelete = '' then BtDelete := Const_LogC_BtExcluir;
-      if BtClose = '' then BtClose := Const_LogC_BtFechar;
-      if PromptDelete = '' then PromptDelete := Const_LogC_ConfirmaExcluir;
-      if PromptDelete_WindowCaption = '' then PromptDelete_WindowCaption := Const_LogC_ConfirmaDelete_WindowCaption; //added by fduenas
-      if OptionUserAll = '' then OptionUserAll := Const_LogC_Todos; //added by fduenas
-      if OptionLevelLow = '' then OptionLevelLow := Const_LogC_Low; //added by fduenas
-      if OptionLevelNormal = '' then OptionLevelNormal := Const_LogC_Normal; //added by fduenas
-      if OptionLevelHigh = '' then OptionLevelHigh := Const_LogC_High; //added by fduenas
-      if OptionLevelCritic = '' then OptionLevelCritic := Const_LogC_Critic; //added by fduenas
-      if DeletePerformed = '' then DeletePerformed := Const_LogC_ExcluirEfectuada; //added by fduenas
+      if WindowCaption = '' then
+        WindowCaption := Const_LogC_WindowCaption;
+
+      if LabelDescription = '' then
+        LabelDescription := Const_LogC_LabelDescricao;
+
+      if LabelUser = '' then
+        LabelUser := Const_LogC_LabelUsuario;
+
+      if LabelDate = '' then
+        LabelDate := Const_LogC_LabelData;
+
+      if LabelLevel = '' then
+        LabelLevel := Const_LogC_LabelNivel;
+
+      if ColLevel = '' then
+        ColLevel := Const_LogC_ColunaNivel;
+
+      if ColMessage = '' then
+        ColMessage := Const_LogC_ColunaMensagem;
+
+      if ColUser = '' then
+        ColUser := Const_LogC_ColunaUsuario;
+
+      if ColDate = '' then
+        ColDate := Const_LogC_ColunaData;
+
+      if BtFilter = '' then
+        BtFilter := Const_LogC_BtFiltro;
+
+      if BtDelete = '' then
+        BtDelete := Const_LogC_BtExcluir;
+
+      if BtClose = '' then
+        BtClose := Const_LogC_BtFechar;
+
+      if PromptDelete = '' then
+        PromptDelete := Const_LogC_ConfirmaExcluir;
+
+      if PromptDelete_WindowCaption = '' then
+        PromptDelete_WindowCaption := Const_LogC_ConfirmaDelete_WindowCaption; //added by fduenas
+
+      if OptionUserAll = '' then
+        OptionUserAll := Const_LogC_Todos; //added by fduenas
+
+      if OptionLevelLow = '' then
+        OptionLevelLow := Const_LogC_Low; //added by fduenas
+
+      if OptionLevelNormal = '' then
+        OptionLevelNormal := Const_LogC_Normal; //added by fduenas
+
+      if OptionLevelHigh = '' then
+        OptionLevelHigh := Const_LogC_High; //added by fduenas
+
+      if OptionLevelCritic = '' then
+        OptionLevelCritic := Const_LogC_Critic; //added by fduenas
+
+      if DeletePerformed = '' then
+        DeletePerformed := Const_LogC_ExcluirEfectuada; //added by fduenas
     end;
+
     with DestSettings.AppMessages do
     begin
-      if MsgsForm_BtNew = '' then MsgsForm_BtNew := Const_Msgs_BtNew;
-      if MsgsForm_BtReplay = '' then MsgsForm_BtReplay := Const_Msgs_BtReplay;
-      if MsgsForm_BtForward = '' then MsgsForm_BtForward := Const_Msgs_BtForward;
-      if MsgsForm_BtDelete = '' then MsgsForm_BtDelete := Const_Msgs_BtDelete;
-      if MsgsForm_BtClose = '' then MsgsForm_BtClose := Const_Msgs_BtClose; //added by fduenas
-      if MsgsForm_WindowCaption = '' then MsgsForm_WindowCaption := Const_Msgs_WindowCaption;
-      if MsgsForm_ColFrom = '' then  MsgsForm_ColFrom := Const_Msgs_ColFrom;
-      if MsgsForm_ColSubject = '' then  MsgsForm_ColSubject := Const_Msgs_ColSubject;
-      if MsgsForm_ColDate = '' then MsgsForm_ColDate := Const_Msgs_ColDate;
-      if MsgsForm_PromptDelete = '' then  MsgsForm_PromptDelete := Const_Msgs_PromptDelete;
-      if MsgsForm_PromptDelete_WindowCaption = '' then  MsgsForm_PromptDelete_WindowCaption := Const_Msgs_PromptDelete_WindowCaption; //added by fduenas
-      if MsgsForm_NoMessagesSelected = '' then  MsgsForm_NoMessagesSelected := Const_Msgs_NoMessagesSelected; //added by fduenas
-      if MsgsForm_NoMessagesSelected_WindowCaption = '' then  MsgsForm_NoMessagesSelected_WindowCaption := Const_Msgs_NoMessagesSelected_WindowCaption; //added by fduenas
+      if MsgsForm_BtNew = '' then
+        MsgsForm_BtNew := Const_Msgs_BtNew;
 
-      if MsgRec_BtClose = '' then  MsgRec_BtClose := Const_MsgRec_BtClose;
-      if MsgRec_WindowCaption = '' then MsgRec_WindowCaption := Const_MsgRec_WindowCaption;
-      if MsgRec_Title = ''then MsgRec_Title := Const_MsgRec_Title;
-      if MsgRec_LabelFrom = ''then MsgRec_LabelFrom := Const_MsgRec_LabelFrom;
-      if MsgRec_LabelDate = '' then MsgRec_LabelDate := Const_MsgRec_LabelDate;
-      if MsgRec_LabelSubject = '' then MsgRec_LabelSubject := Const_MsgRec_LabelSubject;
-      if MsgRec_LabelMessage = '' then MsgRec_LabelMessage := Const_MsgRec_LabelMessage;
+      if MsgsForm_BtReplay = '' then
+        MsgsForm_BtReplay := Const_Msgs_BtReplay;
 
-      if MsgSend_BtSend =  '' then MsgSend_BtSend := Const_MsgSend_BtSend;
-      if MsgSend_BtCancel = '' then MsgSend_BtCancel := Const_MsgSend_BtCancel;
-      if MsgSend_WindowCaption = '' then MsgSend_WindowCaption := Const_MsgSend_WindowCaption;
-      if MsgSend_Title = '' then MsgSend_Title := Const_MsgSend_Title;
-      if MsgSend_GroupTo = '' then MsgSend_GroupTo := Const_MsgSend_GroupTo;
-      if MsgSend_RadioUser = '' then MsgSend_RadioUser := Const_MsgSend_RadioUser;
-      if MsgSend_RadioAll = '' then MsgSend_RadioAll := Const_MsgSend_RadioAll;
-      if MsgSend_GroupMessage = '' then MsgSend_GroupMessage := Const_MsgSend_GroupMessage;
-      if MsgSend_LabelSubject = '' then MsgSend_LabelSubject := Const_MsgSend_LabelSubject; //added by fduenas
-      if MsgSend_LabelMessageText = '' then MsgSend_LabelMessageText  := Const_MsgSend_LabelMessageText; //added by fduenas
+      if MsgsForm_BtForward = '' then
+        MsgsForm_BtForward := Const_Msgs_BtForward;
+
+      if MsgsForm_BtDelete = '' then
+        MsgsForm_BtDelete := Const_Msgs_BtDelete;
+
+      if MsgsForm_BtClose = '' then
+        MsgsForm_BtClose := Const_Msgs_BtClose; //added by fduenas
+
+      if MsgsForm_WindowCaption = '' then
+        MsgsForm_WindowCaption := Const_Msgs_WindowCaption;
+
+      if MsgsForm_ColFrom = '' then
+        MsgsForm_ColFrom := Const_Msgs_ColFrom;
+
+      if MsgsForm_ColSubject = '' then
+        MsgsForm_ColSubject := Const_Msgs_ColSubject;
+
+      if MsgsForm_ColDate = '' then
+        MsgsForm_ColDate := Const_Msgs_ColDate;
+
+      if MsgsForm_PromptDelete = '' then
+        MsgsForm_PromptDelete := Const_Msgs_PromptDelete;
+
+      if MsgsForm_PromptDelete_WindowCaption = '' then
+        MsgsForm_PromptDelete_WindowCaption := Const_Msgs_PromptDelete_WindowCaption; //added by fduenas
+
+      if MsgsForm_NoMessagesSelected = '' then
+        MsgsForm_NoMessagesSelected := Const_Msgs_NoMessagesSelected; //added by fduenas
+
+      if MsgsForm_NoMessagesSelected_WindowCaption = '' then
+        MsgsForm_NoMessagesSelected_WindowCaption := Const_Msgs_NoMessagesSelected_WindowCaption; //added by fduenas
+
+      if MsgRec_BtClose = '' then
+        MsgRec_BtClose := Const_MsgRec_BtClose;
+
+      if MsgRec_WindowCaption = '' then
+        MsgRec_WindowCaption := Const_MsgRec_WindowCaption;
+
+      if MsgRec_Title = ''then
+        MsgRec_Title := Const_MsgRec_Title;
+
+      if MsgRec_LabelFrom = ''then
+        MsgRec_LabelFrom := Const_MsgRec_LabelFrom;
+
+      if MsgRec_LabelDate = '' then
+        MsgRec_LabelDate := Const_MsgRec_LabelDate;
+
+      if MsgRec_LabelSubject = '' then
+        MsgRec_LabelSubject := Const_MsgRec_LabelSubject;
+
+      if MsgRec_LabelMessage = '' then
+        MsgRec_LabelMessage := Const_MsgRec_LabelMessage;
+
+      if MsgSend_BtSend =  '' then
+        MsgSend_BtSend := Const_MsgSend_BtSend;
+
+      if MsgSend_BtCancel = '' then
+        MsgSend_BtCancel := Const_MsgSend_BtCancel;
+
+      if MsgSend_WindowCaption = '' then
+        MsgSend_WindowCaption := Const_MsgSend_WindowCaption;
+
+      if MsgSend_Title = '' then
+        MsgSend_Title := Const_MsgSend_Title;
+
+      if MsgSend_GroupTo = '' then
+        MsgSend_GroupTo := Const_MsgSend_GroupTo;
+
+      if MsgSend_RadioUser = '' then
+        MsgSend_RadioUser := Const_MsgSend_RadioUser;
+
+      if MsgSend_RadioAll = '' then
+        MsgSend_RadioAll := Const_MsgSend_RadioAll;
+
+      if MsgSend_GroupMessage = '' then
+        MsgSend_GroupMessage := Const_MsgSend_GroupMessage;
+
+      if MsgSend_LabelSubject = '' then
+        MsgSend_LabelSubject := Const_MsgSend_LabelSubject; //added by fduenas
+
+      if MsgSend_LabelMessageText = '' then
+        MsgSend_LabelMessageText  := Const_MsgSend_LabelMessageText; //added by fduenas
     end;
    //c DestSettings.WindowsPosition := poMainFormCenter;
+  except on E: Exception do
+    begin
+      ShowMessage('Erro ao aplicar permissões: ' + E.Message);
+      EncerrarAplicacao;
+    end;
+  end;
 end;
-
-
 
 { TUCCollectionItem }
 
 function TUCCollectionItem.GetDisplayName: string;
 begin
-  Result := FormName+'.'+CompName;
-  if Result = '' then Result := inherited GetDisplayName;
+  try
+    Result := FormName+'.'+CompName;
+    if Result = '' then
+      Result := inherited GetDisplayName;
+  except on E: Exception do
+    begin
+      ShowMessage('Erro ao aplicar permissões: ' + E.Message);
+      EncerrarAplicacao;
+    end;
+  end;
 end;
 
 procedure TUCCollectionItem.SetFormName(const Value: string);
 begin
-  if FFormName <> Value then
-    FFormName := Value;
+  try
+    if FFormName <> Value then
+      FFormName := Value;
+  except on E: Exception do
+    begin
+      ShowMessage('Erro ao aplicar permissões: ' + E.Message);
+      EncerrarAplicacao;
+    end;
+  end;
 end;
 
 procedure TUCCollectionItem.SetCompName(const Value: string);
 begin
-  if FCompName <> Value then
-    FCompName:= Value;
+  try
+    if FCompName <> Value then
+      FCompName:= Value;
+  except on E: Exception do
+    begin
+      ShowMessage('Erro ao aplicar permissões: ' + E.Message);
+      EncerrarAplicacao;
+    end;
+  end;
 end;
 
 procedure TUCCollectionItem.SetCaption(const Value: string);
 begin
-  if FCaption <> Value then
-    FCaption:= Value;
+  try
+    if FCaption <> Value then
+      FCaption:= Value;
+  except on E: Exception do
+    begin
+      ShowMessage('Erro ao aplicar permissões: ' + E.Message);
+      EncerrarAplicacao;
+    end;
+  end;
 end;
 
 procedure TUCCollectionItem.SetGroupName(const Value: string);
 begin
-  if FGroupName <> Value then
-    FGroupname := Value;
+  try
+    if FGroupName <> Value then
+      FGroupname := Value;
+  except on E: Exception do
+    begin
+      ShowMessage('Erro ao aplicar permissões: ' + E.Message);
+      EncerrarAplicacao;
+    end;
+  end;
 end;
 
 { TUCCollection }
 
 constructor TUCCollection.Create(UCBase: TUserControl);
 begin
-  inherited Create(TUCCollectionItem);
-  FUCBase := UCBase;
+  try
+    inherited Create(TUCCollectionItem);
+    FUCBase := UCBase;
+  except on E: Exception do
+    begin
+      ShowMessage('Erro ao aplicar permissões: ' + E.Message);
+      EncerrarAplicacao;
+    end;
+  end;
 end;
 
 function TUCCollection.Add: TUCCollectionItem;
 begin
-  Result := TUCCollectionItem(inherited Add);
+  try
+    Result := TUCCollectionItem(inherited Add);
+  except on E: Exception do
+    begin
+      ShowMessage('Erro ao aplicar permissões: ' + E.Message);
+      EncerrarAplicacao;
+    end;
+  end;
 end;
 
 function TUCCollection.GetItem(Index: Integer): TUCCollectionItem;
 begin
-  Result := TUCCollectionItem(inherited GetItem(Index));
+  try
+    Result := TUCCollectionItem(inherited GetItem(Index));
+  except on E: Exception do
+    begin
+      ShowMessage('Erro ao aplicar permissões: ' + E.Message);
+      EncerrarAplicacao;
+    end;
+  end;
 end;
 
 procedure TUCCollection.SetItem(Index: Integer;
 	Value: TUCCollectionItem);
 begin
-  inherited SetItem(Index, Value);
+  try
+    inherited SetItem(Index, Value);
+  except on E: Exception do
+    begin
+      ShowMessage('Erro ao aplicar permissões: ' + E.Message);
+      EncerrarAplicacao;
+    end;
+  end;
 end;
 
 function TUCCollection.GetOwner: TPersistent;
 begin
-  Result := FUCBase;
+  try
+    Result := FUCBase;
+  except on E: Exception do
+    begin
+      ShowMessage('Erro ao aplicar permissões: ' + E.Message);
+      EncerrarAplicacao;
+    end;
+  end;
 end;
-
-
 
 { TUCControls }
 
 function TUCControls.GetActiveForm: String;
 begin
-  Result := TCustomForm(Owner).Name;
+  try
+    Result := TCustomForm(Owner).Name;
+  except on E: Exception do
+    begin
+      ShowMessage('Erro ao aplicar permissões: ' + E.Message);
+      EncerrarAplicacao;
+    end;
+  end;
 end;
 
 function TUCControls.GetUCAccessType: String;
 begin
-  if not Assigned(UserControl) then Result := ''
-  else Result := UserControl.ClassName;
+  try
+    if not Assigned(UserControl) then
+      Result := ''
+    else
+      Result := UserControl.ClassName;
+  except on E: Exception do
+    begin
+      ShowMessage('Erro ao aplicar permissões: ' + E.Message);
+      EncerrarAplicacao;
+    end;
+  end;
 end;
 
 procedure TUCControls.ListComponents(Form: String; List : TStrings);
 var
   Contador : Integer;
 begin
-  List.Clear;
-  if not Assigned(UserControl) then Exit;
-  for Contador := 0 to Pred(UserControl.ExtraRight.Count) do
-    if UpperCase(UserControl.ExtraRight[Contador].FormName) = UpperCase(Form) then
-      List.Append(UserControl.ExtraRight[Contador].CompName);
+  try
+    List.Clear;
+    if not Assigned(UserControl) then
+      Exit;
+
+    for Contador := 0 to Pred(UserControl.ExtraRight.Count) do
+      if UpperCase(UserControl.ExtraRight[Contador].FormName) = UpperCase(Form) then
+        List.Append(UserControl.ExtraRight[Contador].CompName);
+  except on E: Exception do
+    begin
+      ShowMessage('Erro ao aplicar permissões: ' + E.Message);
+      EncerrarAplicacao;
+    end;
+  end;
 end;
 
 procedure TUCControls.ApplyRights;
@@ -3344,14 +4882,15 @@ begin
   try
     // Apply Extra Rights
 
-    if not Assigned(UserControl) then Exit;
+    if not Assigned(UserControl) then
+      Exit;
     with UserControl do
     begin
 
 
 
-  //      if (UserControl.LoginMode = lmActive) and (CurrentUser.UserID = 0)  then Exit;
-  //linha acima removida por camilo, abas n�o aplicou as permiss�es
+      //  if (UserControl.LoginMode = lmActive) and (CurrentUser.UserID = 0)  then Exit;
+      //  linha acima removida por camilo, abas naoplicou as permissões
 
 
     //qmd
@@ -3377,15 +4916,15 @@ begin
         // permissoes do usuario
         TempDS := DataConnector.UCGetSQLDataset(Format('Select %s as UserID,%s as ObjName, %s as UCKey from %sEX Where %s = %d And %s = %s And %s = %s',
                                               [TableRights.FieldUserID,
-                                                TableRights.FieldComponentName,
-                                                TableRights.FieldKey,
-                                                TableRights.TableName,
-                                                TableRights.FieldUserID,
-                                                CurrentUser.UserID,
-                                                TableRights.FieldModule,
-                                                QuotedStr(ApplicationID),
-                                                TableRights.FieldFormName,
-                                                QuotedStr(Self.Owner.Name)]) );
+                                               TableRights.FieldComponentName,
+                                               TableRights.FieldKey,
+                                               TableRights.TableName,
+                                               TableRights.FieldUserID,
+                                               CurrentUser.UserID,
+                                               TableRights.FieldModule,
+                                               QuotedStr(ApplicationID),
+                                               TableRights.FieldFormName,
+                                               QuotedStr(Self.Owner.Name)]) );
 
         //camilo
         TCustomForm(Self.Owner).Enabled := True;
@@ -3426,22 +4965,29 @@ begin
            (Decrypt(TempDS.FieldByName('UCKey').asString, EncryptKey) <> TempDS.FieldByName('UserID').asString + TempDS.FieldByName('ObjName').asString) then
              UnlockEX(TCustomForm(Self.Owner), FListObj[Contador]);
         TempDS.Close;
-      end else LockControls;
+      end
+      else
+        LockControls;
     end;
-
-    except
-      on E: Exception do
-      begin
-        TCustomForm(Self.Owner).Enabled := False;
-        ShowMessage('Erro ao aplicar UCTela: ' + E.Message);
-        // Fechar o formul�rio de forma segura
-        PostMessage(TCustomForm(Self.Owner).Handle, WM_CLOSE, 0, 0);
-        Application.ProcessMessages;
-        TCustomForm(Self.Owner).Close;
-        // For�ar o encerramento do processo do formul�rio
-        TerminateProcess(GetCurrentProcess, 0);
-      end;
+  except on E: Exception do
+    begin
+      ShowMessage('Erro ao aplicar permissões: ' + E.Message);
+      EncerrarAplicacao;
     end;
+  end;
+//    except
+//      on E: Exception do
+//      begin
+//        TCustomForm(Self.Owner).Enabled := False;
+//        ShowMessage('Erro ao aplicar UCTela: ' + E.Message);
+//        // Fechar o formulᲩo de forma segura
+//        PostMessage(TCustomForm(Self.Owner).Handle, WM_CLOSE, 0, 0);
+//        Application.ProcessMessages;
+//        TCustomForm(Self.Owner).Close;
+//        // Forca o encerramento do processo do formulᲩo
+//        TerminateProcess(GetCurrentProcess, 0);
+//      end;
+//    end;
 end;
 
 procedure TUCControls.LockControls;
@@ -3455,28 +5001,42 @@ begin
     for Contador := 0 to Pred(FListObj.Count) do
       UserControl.LockEX(TCustomForm(Self.Owner), FListObj[Contador], NotAllowed = naInvisible);
     FreeAndNil(FListObj);
-  except
-    on E: Exception do
+  except on E: Exception do
     begin
-      TCustomForm(Self.Owner).Enabled := False;
-      ShowMessage('Erro ao aplicar UCTela: ' + E.Message);
-      // Fechar o formul�rio de forma segura
-      PostMessage(TCustomForm(Self.Owner).Handle, WM_CLOSE, 0, 0);
-      Application.ProcessMessages;
-      TCustomForm(Self.Owner).Close;
-      // For�ar o encerramento do processo do formul�rio
-      TerminateProcess(GetCurrentProcess, 0);
+      ShowMessage('Erro ao aplicar permissões: ' + E.Message);
+      EncerrarAplicacao;
     end;
   end;
+
+//  except
+//    on E: Exception do
+//    begin
+//      TCustomForm(Self.Owner).Enabled := False;
+//      ShowMessage('Erro ao aplicar UCTela: ' + E.Message);
+//      // Fechar o formulᲩo de forma segura
+//      PostMessage(TCustomForm(Self.Owner).Handle, WM_CLOSE, 0, 0);
+//      Application.ProcessMessages;
+//      TCustomForm(Self.Owner).Close;
+//      // For硲 o encerramento do processo do formulᲩo
+//      TerminateProcess(GetCurrentProcess, 0);
+//    end;
+//  end;
 end;
 
 procedure TUCControls.Loaded;
 begin
-  inherited;
-  if not (csDesigning in ComponentState) then
-  begin
-    ApplyRights;
-    UserControl.AddUCControlMonitor(Self);
+  try
+    inherited;
+    if not (csDesigning in ComponentState) then
+    begin
+      ApplyRights;
+      UserControl.AddUCControlMonitor(Self);
+    end;
+  except on E: Exception do
+    begin
+      ShowMessage('Erro ao aplicar permissões: ' + E.Message);
+      EncerrarAplicacao;
+    end;
   end;
 end;
 
@@ -3484,55 +5044,99 @@ procedure TUCControls.SetGroupName(const Value: String);
 var
   Contador : Integer;
 begin
-  if FGroupName = Value then Exit;
-  FGroupName := Value;
-  if Assigned(UserControl) then
-  for Contador := 0 to Pred(UserControl.ExtraRight.Count) do
-    if UpperCase(UserControl.ExtraRight[Contador].FormName) = UpperCase(Owner.Name) then
-      UserControl.ExtraRight[Contador].GroupName := Value;
+  try
+    if FGroupName = Value then
+      Exit;
+    FGroupName := Value;
+    if Assigned(UserControl) then
+    for Contador := 0 to Pred(UserControl.ExtraRight.Count) do
+      if UpperCase(UserControl.ExtraRight[Contador].FormName) = UpperCase(Owner.Name) then
+        UserControl.ExtraRight[Contador].GroupName := Value;
+  except on E: Exception do
+    begin
+      ShowMessage('Erro ao aplicar permissões: ' + E.Message);
+      EncerrarAplicacao;
+    end;
+  end;
 end;
 
 destructor TUCControls.Destroy;
 begin
-  if not (csDesigning in ComponentState) then
-  begin
-    if Assigned(UserControl) then  UserControl.DeleteUCControlMonitor(Self);
+  try
+    if not (csDesigning in ComponentState) then
+    begin
+      if Assigned(UserControl) then
+        UserControl.DeleteUCControlMonitor(Self);
+    end;
+    inherited;
+  except on E: Exception do
+    begin
+      ShowMessage('Erro ao aplicar permissões: ' + E.Message);
+      EncerrarAplicacao;
+    end;
   end;
-  inherited;
 end;
 
 procedure TUCControls.SetUserControl(const Value: TUserControl);
 begin
-  FUserControl := Value;
-  if Value <> nil then
-     Value.FreeNotification(self.UserControl);
+  try
+    FUserControl := Value;
+    if Value <> nil then
+       Value.FreeNotification(self.UserControl);
+  except on E: Exception do
+    begin
+      ShowMessage('Erro ao aplicar permissões: ' + E.Message);
+      EncerrarAplicacao;
+    end;
+  end;
 end;
 
 procedure TUCControls.Notification(AComponent: TComponent;
   AOperation: TOperation);
 begin
-  if AOperation = opRemove then
-     if AComponent = FUserControl then
-        FUserControl := nil;
+  try
+    if AOperation = opRemove then
+       if AComponent = FUserControl then
+          FUserControl := nil;
 
-  inherited Notification(AComponent, AOperation);
-
+    inherited Notification(AComponent, AOperation);
+  except on E: Exception do
+    begin
+      ShowMessage('Erro ao aplicar permissões: ' + E.Message);
+      EncerrarAplicacao;
+    end;
+  end;
 end;
 
 { TUCRun }
 
 procedure TUCRun.Execute;
 begin
-  while not self.Terminated do
-  begin
-    if TUserControl(AOwner).DataConnector.UCFindDataConnection then Synchronize(UCStart);
-    Sleep(50);
+  try
+    while not self.Terminated do
+    begin
+      if TUserControl(AOwner).DataConnector.UCFindDataConnection then
+        Synchronize(UCStart);
+      Sleep(50);
+    end;
+  except on E: Exception do
+    begin
+      ShowMessage('Erro ao aplicar permissões: ' + E.Message);
+      EncerrarAplicacao;
+    end;
   end;
 end;
 
 procedure TUCRun.UCStart;
 begin
-  TUserControl(AOwner).Execute;
+  try
+    TUserControl(AOwner).Execute;
+  except on E: Exception do
+    begin
+      ShowMessage('Erro ao aplicar permissões: ' + E.Message);
+      EncerrarAplicacao;
+    end;
+  end;
 end;
 
 function GetVersionApp(const AFileName: String): String;
@@ -3543,22 +5147,165 @@ var
   FI: PVSFixedFileInfo;
   VerSize: DWORD;
 begin
-  Result := EmptyStr;
-  FileName := AFileName;
-  UniqueString(FileName);
-  InfoSize := GetFileVersionInfoSize(PChar(FileName), Wnd);
-  if InfoSize <> 0 then
-  begin
-    GetMem(VerBuf, InfoSize);
+  try
+    Result := EmptyStr;
+    FileName := AFileName;
+    UniqueString(FileName);
+    InfoSize := GetFileVersionInfoSize(PChar(FileName), Wnd);
+    if InfoSize <> 0 then
+    begin
+      GetMem(VerBuf, InfoSize);
+      try
+        if GetFileVersionInfo(PChar(FileName), Wnd, InfoSize, VerBuf) then
+          if VerQueryValue(VerBuf, '\', Pointer(FI), VerSize) then
+            Result:= Concat(IntToStr(FI.dwFileVersionMS shr 16), '.',
+                            IntToStr(FI.dwFileVersionMS and $FFFF), '.',
+                            IntToStr(FI.dwFileVersionLS shr 16), '.',
+                            IntToStr(FI.dwFileVersionLS and $FFFF));
+      finally
+        FreeMem(VerBuf);
+      end;
+    end;
+  except on E: Exception do
+    begin
+      ShowMessage('Erro ao aplicar permissões: ' + E.Message);
+      EncerrarAplicacao;
+    end;
+  end;
+end;
+
+function EncerrarAplicacao : string;
+//ENCERRA A APLICAÇÃO
+//A FUNÇÃO TRATA PARA ENCERRAR DE FORMA NORMAL, CASO
+//NÃO CONSIGA, ENCERRA USANDO TASKKILL, ESSE PRECISA SER
+//TESTADO EM LINUX, TESTES FUNCIONANDO APENAS EM WINDOWS
+var
+  ProcessHandle : THandle;
+  CommandLine   : string;
+  I             : integer;
+  vForm         : TForm;
+  vDataModule   : TDataModule;
+begin
+  try
     try
-      if GetFileVersionInfo(PChar(FileName), Wnd, InfoSize, VerBuf) then
-        if VerQueryValue(VerBuf, '\', Pointer(FI), VerSize) then
-          Result:= Concat(IntToStr(FI.dwFileVersionMS shr 16), '.',
-                          IntToStr(FI.dwFileVersionMS and $FFFF), '.',
-                          IntToStr(FI.dwFileVersionLS shr 16), '.',
-                          IntToStr(FI.dwFileVersionLS and $FFFF));
-    finally
-      FreeMem(VerBuf);
+
+      CommandLine := 'taskkill /f /im ' + ExtractFileName(Application.Exename);
+
+      for I := Application.ComponentCount - 1 downto 0 do
+      begin
+        // Verifica se o componente é um TForm e o destrói
+        if Application.Components[I] is TForm then
+        begin
+          vForm := TForm(Application.Components[I]);
+          if (vForm.Name <> 'fAguarde_Texto') and (vForm.Name <> 'frmAguarde') then
+          begin
+            vForm.Release;
+            vForm := nil;
+          end;
+        end
+        // Verifica se o componente é um TDataModule e o destrói
+        else
+        if Application.Components[I] is TDataModule then
+        begin
+          vDataModule := TDataModule(Application.Components[I]);
+          vDataModule.Free;
+          vDataModule := nil;
+        end;
+      end;
+
+//      while Application.Running do
+//      begin
+//        Application.HandleMessage; // Processa uma mensagem pendente
+//        Sleep(10); // Aguarda um curto período de tempo
+//      end;
+
+//      ShowMessage('finalizando com Application.Terminate');
+      Application.Terminate; // Tente encerrar a aplicação normalmente
+      Application.ProcessMessages; // Processe mensagens pendentes
+
+      if not(CurrentProcessIsRunning) then
+      begin
+        //ShowMessage('finalizando com PostQuitMessage(0)');
+        Application.ProcessMessages; // Processe mensagens pendentes
+        Sleep(500);
+        PostQuitMessage(0);
+      end;
+
+      if not(CurrentProcessIsRunning) then
+      begin
+//        ShowMessage('finalizando TerminateProcess(GetCurrentProcess, 0)');
+        Application.ProcessMessages; // Processe mensagens pendentes
+        Sleep(500);
+        TerminateProcess(GetCurrentProcess, 0);
+      end;
+
+    except
+      on E: Exception do
+      begin
+//        ShowMessage('finalizando shell');
+        Sleep(500);
+        ShellExecute(0, 'open', 'cmd.exe', PChar('/C ' + CommandLine), nil, SW_HIDE);
+      end;
+    end;
+
+  finally
+
+    while not(CurrentProcessIsRunning) do
+    begin
+        ShowMessage('entrou no loop finalizar');
+      Application.ProcessMessages;
+      Application.Terminate;
+      sleep(500);
+
+      Application.ProcessMessages;
+      TerminateProcess(GetCurrentProcess, 0);
+      sleep(500);
+
+      Application.ProcessMessages;
+      ShellExecute(0, 'open', 'cmd.exe', PChar('/C ' + CommandLine), nil, SW_HIDE);
+      sleep(500);
+
+    end;
+  end;
+end;
+
+function CurrentProcessIsRunning: boolean;
+// TESTA DE O EXE ESTÁ EM EXECUÇÃO E RETORNA UM BOLEANO
+var
+  hMutex        : THandle;
+  ProcessHandle : THandle;
+  bhMutex       : boolean;
+begin
+  Application.ProcessMessages;
+
+  hMutex := CreateMutex(nil, true, PChar(ExtractFileName(ParamStr(0))));
+  bhMutex:= not((hMutex <> 0) and (GetLastError = 0));
+
+  ProcessHandle := OpenProcess(PROCESS_QUERY_INFORMATION, False, GetCurrentProcessId);
+
+  if not(bhMutex) or (hMutex <> 0) or (ProcessHandle <> 0) then
+    Result := False
+  else
+    Result := True;
+end;
+
+procedure TUserControl.LimpaDadosUsuario;
+begin
+  try
+    CurrentUser.UserID        := 0;
+    CurrentUser.Profile       := 0;
+
+    CurrentUser.Username     := '';
+    CurrentUser.LoginName    := '';
+    CurrentUser.Password     := '';
+    CurrentUser.Email        := '';
+
+    CurrentUser.Privilegiado := False;
+
+   except on E: Exception do
+    begin
+      ShowMessage('Erro ao aplicar permissões: ' + E.Message);
+      EncerrarAplicacao;
     end;
   end;
 end;
